@@ -45,7 +45,9 @@ max level, `has_no_travel`), plus `rank` and `recommended`.
 with hourly risk / wind / rain / snow for hours 0–48 after departure. Fetched once per plan; the slider is fully
 client-side (each hour is a feature property and only the heatmap paint expression changes, so no data re-upload).
 
-`GET /api/health`
+`GET /health` and `GET /api/health` → `{"ok": true}`
+
+MapLibre worker: Vite pre-bundling breaks maplibre-gl's default worker URL, so `src/maplibre-setup.ts` sets it explicitly with `setWorkerUrl(import "…/maplibre-gl-worker.mjs?url")` (served in dev, emitted as a hashed asset in builds).
 
 ## API choices
 

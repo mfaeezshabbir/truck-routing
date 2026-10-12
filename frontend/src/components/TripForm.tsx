@@ -28,7 +28,7 @@ export default function TripForm({ onSubmit, loading }: { onSubmit: (r: PlanRequ
     >
       <div><label className={label}>Origin</label><input className={input} value={origin} onChange={e => setOrigin(e.target.value)} required /></div>
       <div><label className={label}>Destination</label><input className={input} value={destination} onChange={e => setDestination(e.target.value)} required /></div>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-1">
         <div><label className={label}>Departure</label><input type="datetime-local" className={input} value={departure} onChange={e => setDeparture(e.target.value)} required /></div>
         <div><label className={label}>Load (lb)</label><input type="number" min={0} max={200000} step={500} className={input} value={load} onChange={e => setLoad(Number(e.target.value))} required /></div>
       </div>
