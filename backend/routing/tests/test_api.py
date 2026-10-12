@@ -31,7 +31,7 @@ def client(monkeypatch):
             raise services.InputError(f"Could not find location: {q}")
         return PLACES[q.lower()]
 
-    def routes(o, d):
+    def routes(o, d, load_lb=0.0):
         coords = [[o["lon"], o["lat"] + i * (d["lat"] - o["lat"]) / 100] for i in range(101)]
         dur = 3600 * 2.0
         return [{"coords": coords, "seg_durations": [dur / 100] * 100, "distance_m": 69.1 * geo.METERS_PER_MILE,
@@ -182,3 +182,76 @@ def test_open_meteo_retries_transient_errors(monkeypatch):
     monkeypatch.setattr(services.time, "sleep", lambda s: None)
     t, p = services.fetch_hourly([(40, -100)], datetime.now(timezone.utc), datetime.now(timezone.utc))
     assert len(calls) == 3 and len(t) == 1
+
+
+class _FakeResp:
+    def __init__(self, code, payload):
+        self.status_code, self.ok, self._p, self.text = code, code == 200, payload, str(payload)
+
+    def json(self):
+        return self._p
+
+
+def _ors_feature(lon0, lat0, lon1, lat1, dist_m, dur_s):
+    return {"geometry": {"coordinates": [[lon0, lat0], [(lon0 + lon1) / 2, (lat0 + lat1) / 2], [lon1, lat1]]},
+            "properties": {"summary": {"distance": dist_m, "duration": dur_s},
+                           "segments": [{"steps": [{"way_points": [0, 2], "duration": dur_s}]}]}}
+
+
+def test_gross_weight_tonnes():
+    assert services.gross_weight_tonnes(45000) == pytest.approx(36.3, abs=0.05)
+    assert services.gross_weight_tonnes(0) == pytest.approx(15.9, abs=0.05)
+
+
+def test_ors_long_trip_uses_via_points_with_hgv_weight(monkeypatch, settings):
+    settings.ORS_API_KEY = "test"
+    bodies = []
+
+    class S:
+        def post(self, url, json, headers, timeout):
+            bodies.append(json)
+            if "alternative_routes" in json:
+                return _FakeResp(400, {"error": {"code": 2004, "message": "too long"}})
+            pts = json["coordinates"]
+            mid = pts[1] if len(pts) == 3 else pts[0]
+            return _FakeResp(200, {"features": [_ors_feature(pts[0][0], pts[0][1], pts[-1][0], pts[-1][1] + 0 * mid[0],
+                                                             1_000_000, 36000 + 600 * len(bodies))]})
+
+    monkeypatch.setattr(services, "_session", lambda: S())
+    monkeypatch.setattr(services, "_overlap", lambda a, b: 0.0)
+    o, d = {"lon": -87.6, "lat": 41.9}, {"lon": -122.3, "lat": 47.6}
+    routes, provider = services._ors_routes(o, d, load_lb=45000)
+    assert len(routes) == 3 and "driving-hgv" in provider
+    assert not any("alternative_routes" in b for b in bodies)  # long trip: never ask (ORS 100 km limit)
+    assert all(b["options"]["profile_params"]["restrictions"]["weight"] == 36.3 for b in bodies)
+    via = [b for b in bodies if len(b["coordinates"]) == 3]
+    assert via and all(b["radiuses"][1] == -1 for b in via)
+
+
+def test_ors_short_trip_falls_back_when_alternatives_rejected(monkeypatch, settings):
+    settings.ORS_API_KEY = "test"
+    bodies = []
+
+    class S:
+        def post(self, url, json, headers, timeout):
+            bodies.append(json)
+            if "alternative_routes" in json:
+                return _FakeResp(400, {"error": {"code": 2004, "message": "too long"}})
+            p = json["coordinates"]
+            return _FakeResp(200, {"features": [_ors_feature(p[0][0], p[0][1], p[-1][0], p[-1][1], 50000, 3000)]})
+
+    monkeypatch.setattr(services, "_session", lambda: S())
+    routes, _ = services._ors_routes({"lon": -96.8, "lat": 32.78}, {"lon": -97.33, "lat": 32.75})
+    assert "alternative_routes" in bodies[0] and routes
+
+
+def test_ors_unroutable_endpoint_is_input_error(monkeypatch, settings):
+    settings.ORS_API_KEY = "test"
+
+    class S:
+        def post(self, *a, **k):
+            return _FakeResp(404, {"error": {"code": 2010, "message": "no routable point"}})
+
+    monkeypatch.setattr(services, "_session", lambda: S())
+    with pytest.raises(services.InputError):
+        services._ors_routes({"lon": -96.8, "lat": 32.78}, {"lon": -97.33, "lat": 32.75})

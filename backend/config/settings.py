@@ -21,6 +21,19 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
+def _load_dotenv(path):
+    """Minimal backend/.env loader (KEY=VALUE lines); real environment variables take precedence."""
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith('#') and '=' in line:
+            k, v = line.split('=', 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+_load_dotenv(BASE_DIR / '.env')
+
 SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY') or 'django-insecure-fm!f9m$z)g00i58ng-9_4m%#b0@ioq!!7b!c3h-je4@8z_n=o-'
 
 # SECURITY WARNING: don't run with debug turned on in production!

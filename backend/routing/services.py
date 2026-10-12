@@ -1,4 +1,5 @@
 """External API clients: geocoding, routing (ORS / OSRM fallback), weather (Open-Meteo)."""
+import hashlib
 import logging
 import time
 from datetime import datetime, timedelta, timezone
@@ -40,7 +41,7 @@ def _session():
 
 # ---------------------------------------------------------------- geocoding
 def geocode(query: str) -> dict:
-    key = f"geo:{query.strip().lower()}"
+    key = "geo:" + hashlib.sha1(query.strip().lower().encode()).hexdigest()  # memcached-safe key
     hit = cache.get(key)
     if hit:
         return hit
@@ -83,18 +84,40 @@ def geocode(query: str) -> dict:
 
 
 # ---------------------------------------------------------------- routing
-def _ors_routes(o, d):
+ORS_URL = "https://api.openrouteservice.org/v2/directions/driving-hgv/geojson"
+# ORS rejects alternative_routes when the approximated route is > 100 km (error 2004). Ask for engine
+# alternatives only when the straight line is clearly short; otherwise synthesise them with via points.
+ORS_ALT_MAX_STRAIGHT_MI = 45.0
+TRACTOR_TRAILER_TARE_LB = 35000.0  # typical empty 5-axle tractor + 53 ft trailer
+LB_PER_TONNE = 2204.62
+
+
+def gross_weight_tonnes(load_lb: float) -> float:
+    """ORS hgv `restrictions.weight` is the vehicle's gross weight in tonnes; the user enters cargo weight."""
+    return round((max(load_lb, 0.0) + TRACTOR_TRAILER_TARE_LB) / LB_PER_TONNE, 1)
+
+
+def _ors_call(points, alternatives, load_lb=0.0):
     body = {
-        "coordinates": [[o["lon"], o["lat"]], [d["lon"], d["lat"]]],
-        "alternative_routes": {"target_count": 3, "share_factor": 0.6, "weight_factor": 1.6},
+        "coordinates": [[p[0], p[1]] for p in points],
+        # Default snap radius is 350 m: a synthetic via point in a field/lake fails with 2010. Snap via
+        # points anywhere (-1); endpoints are geocoded places, allow 5 km.
+        "radiuses": [5000 if i in (0, len(points) - 1) else -1 for i in range(len(points))],
         "instructions": True,
         "units": "m",
+        "options": {"vehicle_type": "hgv",
+                    "profile_params": {"restrictions": {"weight": gross_weight_tonnes(load_lb)}}},
     }
-    r = _session().post(
-        "https://api.openrouteservice.org/v2/directions/driving-hgv/geojson",
-        json=body, headers={"Authorization": settings.ORS_API_KEY}, timeout=60,
-    )
+    if alternatives:
+        body["alternative_routes"] = {"target_count": 3, "share_factor": 0.6, "weight_factor": 1.6}
+    r = _session().post(ORS_URL, json=body, headers={"Authorization": settings.ORS_API_KEY}, timeout=60)
     if not r.ok:
+        try:
+            code = r.json().get("error", {}).get("code")
+        except ValueError:
+            code = None
+        if code in (2009, 2010):  # route not found / point not routable
+            raise InputError("No drivable truck route between these locations.")
         raise UpstreamError(f"OpenRouteService error {r.status_code}: {r.text[:200]}")
     out = []
     for f in r.json()["features"]:
@@ -112,7 +135,21 @@ def _ors_routes(o, d):
         s = f["properties"]["summary"]
         out.append({"coords": coords, "seg_durations": segd,
                     "distance_m": s["distance"], "duration_s": s["duration"]})
-    return out, "openrouteservice (driving-hgv)"
+    return out
+
+
+def _ors_routes(o, d, load_lb=0.0):
+    a, b = (o["lon"], o["lat"]), (d["lon"], d["lat"])
+    routes = None
+    if geo.haversine_mi(a, b) <= ORS_ALT_MAX_STRAIGHT_MI:
+        try:
+            routes = _ors_call([a, b], True, load_lb)
+        except UpstreamError as e:  # e.g. 2004 when the road distance still exceeds 100 km
+            log.info("ORS alternatives unavailable, using via points: %s", e)
+    if routes is None:
+        routes = _ors_call([a, b], False, load_lb)
+    routes = _add_via_alternatives(routes, a, b, lambda pts: _ors_call(pts, False, load_lb)[0])
+    return routes[:3], "openrouteservice (driving-hgv, gross %.1f t)" % gross_weight_tonnes(load_lb)
 
 
 def _osrm_call(points, alternatives):
@@ -146,43 +183,56 @@ def _overlap(a, b):
     return near / max(1, len(pts))
 
 
+def _add_via_alternatives(routes, a, b, route_via):
+    """Top up to 3 routes by forcing a via point offset perpendicular to the straight line at the midpoint.
+
+    route_via(points) -> one route dict. Candidates must be <=1.6x the fastest duration and overlap
+    every existing route <80%.
+    """
+    if len(routes) >= 3:
+        return routes
+    straight = geo.haversine_mi(a, b)
+    brg = geo.bearing(a, b)
+    mid = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+    for frac in (0.10, 0.18, 0.30):  # small offsets keep via points on land (e.g. Florida peninsula)
+        for side in (90, -90):
+            if len(routes) >= 3:
+                return routes
+            via = geo.offset_point(mid[0], mid[1], brg + side, straight * frac)
+            try:
+                cand = route_via([a, via, b])
+            except (UpstreamError, InputError, requests.RequestException):
+                continue
+            if cand["duration_s"] > routes[0]["duration_s"] * 1.6:
+                continue
+            if all(_overlap(cand, r) < 0.8 for r in routes):
+                routes.append(cand)
+    return routes
+
+
 def _osrm_routes(o, d):
-    routes = _osrm_call([(o["lon"], o["lat"]), (d["lon"], d["lat"])], 3)
-    if len(routes) < 3:
-        # Demo server often returns <3 alternatives: synthesise more by forcing a via point
-        # offset perpendicular to the straight line at the midpoint.
-        a, b = (o["lon"], o["lat"]), (d["lon"], d["lat"])
-        straight = geo.haversine_mi(a, b)
-        brg = geo.bearing(a, b)
-        mid = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
-        for frac in (0.18, 0.30):
-            for side in (90, -90):
-                if len(routes) >= 3:
-                    break
-                via = geo.offset_point(mid[0], mid[1], brg + side, straight * frac)
-                try:
-                    cand = _osrm_call([a, via, b], False)[0]
-                except (UpstreamError, InputError):
-                    continue
-                best = routes[0]
-                if cand["duration_s"] > best["duration_s"] * 1.6:
-                    continue
-                if all(_overlap(cand, r) < 0.8 for r in routes):
-                    routes.append(cand)
+    a, b = (o["lon"], o["lat"]), (d["lon"], d["lat"])
+    routes = _osrm_call([a, b], 3)
+    routes = _add_via_alternatives(routes, a, b, lambda pts: _osrm_call(pts, False)[0])
     return routes[:3], "OSRM public demo (car profile; ORS_API_KEY not set)"
 
 
-def get_routes(o, d):
-    key = f"routes:{o['lon']:.4f},{o['lat']:.4f}:{d['lon']:.4f},{d['lat']:.4f}:{bool(settings.ORS_API_KEY)}"
+def get_routes(o, d, load_lb: float = 0.0):
+    use_ors = bool(settings.ORS_API_KEY)
+    wt = gross_weight_tonnes(load_lb) if use_ors else 0
+    key = f"routes:{o['lon']:.4f},{o['lat']:.4f}:{d['lon']:.4f},{d['lat']:.4f}:{use_ors}:{wt}"
     hit = cache.get(key)
     if hit:
         return hit
-    if settings.ORS_API_KEY:
+    if use_ors:
         try:
-            res = _ors_routes(o, d)
-        except (UpstreamError, InputError, requests.RequestException) as e:
+            res = _ors_routes(o, d, load_lb)
+        except InputError:
+            raise
+        except (UpstreamError, requests.RequestException) as e:
             log.warning("ORS failed, falling back to OSRM: %s", e)
-            res = _osrm_routes(o, d)
+            routes, _ = _osrm_routes(o, d)
+            res = routes, "OSRM public demo (car profile; OpenRouteService unavailable)"
     else:
         res = _osrm_routes(o, d)
     cache.set(key, res, 3600)

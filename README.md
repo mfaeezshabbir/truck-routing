@@ -54,8 +54,8 @@ MapLibre worker: Vite pre-bundling breaks maplibre-gl's default worker URL, so `
 | Need | Service | Notes |
 |---|---|---|
 | Geocoding | Nominatim (OSM) with identifying User-Agent, Photon fallback; ORS geocoder when a key is set | free, no key |
-| Routing | **OpenRouteService `driving-hgv`** with `alternative_routes` (target 3) when `ORS_API_KEY` is set | truck profile |
-| Routing fallback | **OSRM public demo** (`router.project-osrm.org`, `alternatives=3`) | car profile; demo often returns <3 alternatives, so extra alternatives are synthesised by forcing a via-point offset perpendicular at the trip midpoint (18% / 30% of the straight-line distance, each side), keeping only candidates ≤1.6× the fastest duration that overlap existing routes <80% |
+| Routing | **OpenRouteService `driving-hgv`** when `ORS_API_KEY` is set (put it in `backend/.env`, gitignored, auto-loaded by settings) | truck profile; `restrictions.weight` = gross tonnes = (load + 35,000 lb tare) / 2204.62. ORS only allows `alternative_routes` for routes ≤100 km (error 2004), so it is requested only when the straight line is ≤45 mi; otherwise (or if rejected) the same via-point detour strategy below is run **on ORS hgv** (via points use `radiuses: -1` so they snap to the nearest road), giving 3 truck routes. On ORS outage it falls back to OSRM |
+| Routing fallback | **OSRM public demo** (`router.project-osrm.org`, `alternatives=3`) | car profile; demo often returns <3 alternatives, so extra alternatives are synthesised by forcing a via-point offset perpendicular at the trip midpoint (10% / 18% / 30% of the straight-line distance, each side), keeping only candidates ≤1.6× the fastest duration that overlap existing routes <80% |
 | Weather | **Open-Meteo** hourly forecast, multi-location batch (100 points/request) | `wind_speed_unit=mph`, `precipitation_unit=inch` (so snowfall is inches/hour) |
 
 Responses (geocodes, routes) are cached in memory; a plan's route lines are cached for 1 h for the heatmap call.

@@ -25,7 +25,7 @@ def plan_trip(origin: str, destination: str, departure, load_lb: float, interval
     d = services.geocode(destination)
     if geo.haversine_mi((o["lon"], o["lat"]), (d["lon"], d["lat"])) < 1.0:
         raise services.InputError("Origin and destination are the same place.")
-    raw_routes, provider = services.get_routes(o, d)
+    raw_routes, provider = services.get_routes(o, d, load_lb)
     if not raw_routes:
         raise services.UpstreamError("No route found")
 
