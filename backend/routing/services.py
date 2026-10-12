@@ -1,5 +1,6 @@
 """External API clients: geocoding, routing (ORS / OSRM fallback), weather (Open-Meteo)."""
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -14,6 +15,21 @@ TIMEOUT = 30
 
 class UpstreamError(Exception):
     pass
+
+
+class InputError(Exception):
+    """The request is valid JSON but cannot be planned (unknown place, no road route, ...)."""
+
+
+# Open-Meteo serves hourly forecasts up to day 16 (today + 15 days, inclusive, UTC dates).
+FORECAST_DAYS = 16
+
+
+def forecast_horizon(now: datetime | None = None) -> datetime:
+    """Last hourly timestamp (UTC) Open-Meteo will return a forecast for."""
+    now = now or datetime.now(timezone.utc)
+    midnight = now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight + timedelta(days=FORECAST_DAYS - 1, hours=23)
 
 
 def _session():
@@ -57,7 +73,7 @@ def geocode(query: str) -> dict:
         r = _session().get("https://photon.komoot.io/api/", params={"q": query, "limit": 1}, timeout=TIMEOUT)
         feats = r.json().get("features", []) if r.ok else []
         if not feats:
-            raise UpstreamError(f"Could not find location: {query}")
+            raise InputError(f"Could not find location: {query}")
         p = feats[0]["properties"]
         lon, lat = feats[0]["geometry"]["coordinates"]
         label = ", ".join(x for x in (p.get("name"), p.get("state"), p.get("country")) if x)
@@ -107,10 +123,13 @@ def _osrm_call(points, alternatives):
                 "overview": "full", "geometries": "geojson", "annotations": "duration", "steps": "false"},
         timeout=60,
     )
-    if not r.ok or r.json().get("code") != "Ok":
+    body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+    if body.get("code") in ("NoRoute", "NoSegment"):
+        raise InputError("No drivable road route between these locations.")
+    if not r.ok or body.get("code") != "Ok":
         raise UpstreamError(f"OSRM error {r.status_code}: {r.text[:200]}")
     out = []
-    for rt in r.json()["routes"]:
+    for rt in body["routes"]:
         segd = []
         for leg in rt["legs"]:
             segd.extend(leg.get("annotation", {}).get("duration", []))
@@ -143,7 +162,7 @@ def _osrm_routes(o, d):
                 via = geo.offset_point(mid[0], mid[1], brg + side, straight * frac)
                 try:
                     cand = _osrm_call([a, via, b], False)[0]
-                except UpstreamError:
+                except (UpstreamError, InputError):
                     continue
                 best = routes[0]
                 if cand["duration_s"] > best["duration_s"] * 1.6:
@@ -161,7 +180,7 @@ def get_routes(o, d):
     if settings.ORS_API_KEY:
         try:
             res = _ors_routes(o, d)
-        except (UpstreamError, requests.RequestException) as e:
+        except (UpstreamError, InputError, requests.RequestException) as e:
             log.warning("ORS failed, falling back to OSRM: %s", e)
             res = _osrm_routes(o, d)
     else:
@@ -186,7 +205,7 @@ def fetch_hourly(points, start: datetime, end: datetime):
     Snowfall is requested in inches (precipitation_unit=inch); hourly values are per hour = in/hr.
     """
     start = _hour_floor(start.astimezone(timezone.utc))
-    end = _hour_floor(end.astimezone(timezone.utc)) + timedelta(hours=1)
+    end = min(_hour_floor(end.astimezone(timezone.utc)) + timedelta(hours=1), forecast_horizon())
     sess = _session()
     results = []
     times = None
@@ -202,7 +221,11 @@ def fetch_hourly(points, start: datetime, end: datetime):
             "start_hour": start.strftime("%Y-%m-%dT%H:%M"),
             "end_hour": end.strftime("%Y-%m-%dT%H:%M"),
         }
-        r = sess.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=60)
+        for attempt in range(3):  # Open-Meteo intermittently answers 429/503 "overloaded"
+            r = sess.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=60)
+            if r.status_code not in (429, 500, 502, 503, 504):
+                break
+            time.sleep(0.5 * 2 ** attempt)
         if not r.ok:
             raise UpstreamError(f"Open-Meteo error {r.status_code}: {r.text[:200]}")
         data = r.json()

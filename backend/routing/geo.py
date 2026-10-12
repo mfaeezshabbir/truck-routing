@@ -77,3 +77,38 @@ def bearing(a, b):
     y = math.sin(lon2 - lon1) * math.cos(lat2)
     x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(lon2 - lon1)
     return math.degrees(math.atan2(y, x)) % 360
+
+
+def simplify(coords, tol_deg: float = 0.0005):
+    """Ramer-Douglas-Peucker (iterative) in lon/lat degrees; keeps endpoints. ~50 m default tolerance.
+
+    Used only for the geometry sent to the browser; sampling/ETAs use the full-resolution line.
+    """
+    n = len(coords)
+    if n < 3:
+        return list(coords)
+    keep = [False] * n
+    keep[0] = keep[-1] = True
+    stack = [(0, n - 1)]
+    while stack:
+        a, b = stack.pop()
+        ax, ay = coords[a][0], coords[a][1]
+        bx, by = coords[b][0], coords[b][1]
+        dx, dy = bx - ax, by - ay
+        L2 = dx * dx + dy * dy
+        best, bi = -1.0, -1
+        for i in range(a + 1, b):
+            px, py = coords[i][0] - ax, coords[i][1] - ay
+            if L2 == 0:
+                d = px * px + py * py
+            else:
+                t = max(0.0, min(1.0, (px * dx + py * dy) / L2))
+                ex, ey = px - t * dx, py - t * dy
+                d = ex * ex + ey * ey
+            if d > best:
+                best, bi = d, i
+        if bi != -1 and best > tol_deg * tol_deg:
+            keep[bi] = True
+            stack.append((a, bi))
+            stack.append((bi, b))
+    return [c for c, k in zip(coords, keep) if k]

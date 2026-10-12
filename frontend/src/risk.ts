@@ -10,4 +10,7 @@ export const fmtDuration = (s: number) => {
   return `${h}h ${m.toString().padStart(2, '0')}m`
 }
 export const fmtTime = (iso: string) =>
-  new Date(iso).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+  new Date(iso).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })
+
+/** The browser's IANA zone: departures are entered and all times displayed in it. */
+export const LOCAL_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone

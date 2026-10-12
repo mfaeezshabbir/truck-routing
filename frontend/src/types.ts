@@ -23,7 +23,7 @@ export interface Plan {
   interval_mi: number; recommended_route_id: number | null; warning: string | null; routes: Route[]
 }
 export interface Heatmap {
-  plan_id: string; points: [number, number][]; hours: string[]
+  plan_id: string; departure: string; points: [number, number][]; hours: string[]
   risk: number[][]; wind_mph: number[][]; rain_in_hr: number[][]; snow_in_hr: number[][]
 }
 export interface PlanRequest {

@@ -110,6 +110,7 @@ def summarize(segments: list[Segment], duration_s: float) -> dict:
 def recommendation_key(summary: dict):
     return (
         1 if summary["has_no_travel"] else 0,
+        round(summary.get("no_travel_miles", 0.0), 1),  # among blocked routes, least blocked distance first
         round(summary["severe_miles"], 1),
         round(summary["high_miles"], 1),
         round(summary["avg_risk"], 3),

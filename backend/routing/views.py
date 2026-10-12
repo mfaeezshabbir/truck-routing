@@ -25,6 +25,8 @@ def plan(request):
                         status=status.HTTP_400_BAD_REQUEST)
     try:
         data = planner.plan_trip(v["origin"], v["destination"], v["departure"], v["load_lb"], int(v["interval_mi"]))
+    except services.InputError as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
     except services.UpstreamError as e:
         return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
     except requests.RequestException as e:

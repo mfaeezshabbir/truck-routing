@@ -1,7 +1,9 @@
+import '../maplibre-setup'
 import type * as GeoJSON from "geojson"
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Map, { Layer, NavigationControl, Popup, Source } from 'react-map-gl/maplibre'
 import type { MapLayerMouseEvent, MapRef } from 'react-map-gl/maplibre'
+import type { ExpressionSpecification } from 'maplibre-gl'
 import type { Checkpoint, Heatmap, Plan } from '../types'
 import { RISK_COLORS, fmtTime } from '../risk'
 
@@ -47,14 +49,17 @@ export default function MapView({ plan, heatmap, hour, metric, showHeatmap, sele
 
   useEffect(() => {
     if (!plan || !mapRef.current) return
-    const xs = plan.routes.flatMap(r => r.geometry.coordinates.map(c => c[0]))
-    const ys = plan.routes.flatMap(r => r.geometry.coordinates.map(c => c[1]))
-    mapRef.current.fitBounds([[Math.min(...xs), Math.min(...ys)], [Math.max(...xs), Math.max(...ys)]], { padding: 60, duration: 800 })
+    // Plain loop: Math.min(...hugeArray) can overflow the call stack on long routes.
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+    for (const r of plan.routes) for (const [x, y] of r.geometry.coordinates) {
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y
+    }
+    if (Number.isFinite(x0)) mapRef.current.fitBounds([[x0, y0], [x1, y1]], { padding: 60, duration: 800 })
     setPopup(null)
   }, [plan])
 
   const key = `${metric}_${hour}`
-  const weight: any = ['min', 1, ['/', ['coalesce', ['get', key], 0], METRIC_MAX[metric]]]
+  const weight: ExpressionSpecification = ['min', 1, ['/', ['coalesce', ['get', key], 0], METRIC_MAX[metric]]]
 
   const onClick = (e: MapLayerMouseEvent) => {
     const f = e.features?.[0]

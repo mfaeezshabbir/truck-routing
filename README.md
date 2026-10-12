@@ -19,7 +19,7 @@ python3 -m venv venv && . venv/bin/activate
 pip install -r requirements.txt
 export ORS_API_KEY=...          # optional; see "Routing" below
 python manage.py runserver 8000
-pytest -q                        # unit tests (risk, load, recommendation, sampling)
+pytest -q                        # unit + API tests (risk, load, recommendation, sampling, errors, heatmap)
 
 # frontend (dev server proxies /api -> :8000)
 cd frontend
@@ -71,7 +71,7 @@ Responses (geocodes, routes) are cached in memory; a plan's route lines are cach
 5. Checkpoint risk = worst of wind / rain / snow levels, then the load rules can only raise it.
 6. Route summary is **mileage-weighted**: each checkpoint represents half the distance to each neighbour
    (so at 25 mi interior checkpoints each represent 25 mi, the endpoints 12.5 mi, and the sum equals route length).
-7. Ranking: routes with any No Travel checkpoint last (and never "Recommended"), then fewest Severe miles,
+7. Ranking: routes with any No Travel checkpoint last (and never "Recommended"; among them fewest No Travel miles first), then fewest Severe miles,
    fewest High miles, lowest average risk, shortest travel time. If every route has No Travel, no route is
    recommended and a warning suggests delaying departure.
 
@@ -87,7 +87,17 @@ Responses (geocodes, routes) are cached in memory; a plan's route lines are cach
 * **Average risk** = Σ(level × miles) / total miles on the 0–4 scale (Low 0 … No Travel 4).
 * Ties in severe/high miles are compared at 0.1 mi resolution.
 * Departure must be within the forecast horizon (now − 1 h … now + 13 days).
-* Heatmap hours beyond the forecast window clamp to the last available hour.
+* The whole trip (latest arrival) must end inside Open-Meteo's 16-day hourly horizon, otherwise `400` with a clear message.
+  Heatmap slider steps are the real forecast hours (nearest hour to departure, +0…+48 h); hours past the horizon are
+  dropped instead of repeating the last hour.
+* **Time zones.** The API works in UTC (a departure without an offset is treated as UTC). The UI's `datetime-local`
+  departure is interpreted in the **browser's** time zone (shown under the field) and every ETA/arrival/slider time
+  is displayed in that zone with its abbreviation. Open-Meteo is queried with `timezone=GMT`.
+* **Errors.** Unknown place, same origin/destination, no road route (e.g. ocean crossing), past/too-far departure and
+  out-of-range load return `400` with an `error` message; upstream outages return `502`. Open-Meteo 429/5xx are retried
+  up to 3× with back-off.
+* Route geometry sent to the browser is simplified (Douglas-Peucker, ~50 m), e.g. Chicago→Seattle response 1.6 MB → 0.2 MB;
+  checkpoints/ETAs still use full-resolution lines. MapLibre is lazy-loaded in its own chunk (initial JS ≈ 73 kB gzip).
 
 ## Gaps / next steps
 * Without an ORS key the routes come from OSRM's **car** profile (no truck restrictions); set `ORS_API_KEY` for HGV.

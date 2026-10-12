@@ -23,6 +23,8 @@ def _weather_at(h, i):
 def plan_trip(origin: str, destination: str, departure, load_lb: float, interval_mi: int) -> dict:
     o = services.geocode(origin)
     d = services.geocode(destination)
+    if geo.haversine_mi((o["lon"], o["lat"]), (d["lon"], d["lat"])) < 1.0:
+        raise services.InputError("Origin and destination are the same place.")
     raw_routes, provider = services.get_routes(o, d)
     if not raw_routes:
         raise services.UpstreamError("No route found")
@@ -39,6 +41,11 @@ def plan_trip(origin: str, destination: str, departure, load_lb: float, interval
         routes.append({"raw": rr, "checkpoints": cps})
 
     max_eta = max(r["checkpoints"][-1]["eta"] for r in routes)
+    horizon = services.forecast_horizon()
+    if max_eta > horizon:
+        raise services.InputError(
+            f"Trip would arrive {max_eta:%Y-%m-%d %H:%M} UTC, beyond the weather forecast horizon "
+            f"({horizon:%Y-%m-%d %H:%M} UTC). Choose an earlier departure.")
     times, hourly = services.fetch_hourly(all_points, departure, max_eta)
 
     summaries = []
@@ -64,7 +71,7 @@ def plan_trip(origin: str, destination: str, departure, load_lb: float, interval
             "distance_mi": round(r["raw"]["distance_m"] / geo.METERS_PER_MILE, 1),
             "duration_s": round(r["raw"]["duration_s"]),
             "arrival": (departure + timedelta(seconds=r["raw"]["duration_s"])).isoformat(),
-            "geometry": {"type": "LineString", "coordinates": [[round(x, 5), round(y, 5)] for x, y in r["raw"]["coords"]]},
+            "geometry": {"type": "LineString", "coordinates": [[round(x, 5), round(y, 5)] for x, y in geo.simplify(r["raw"]["coords"])]},
             "checkpoints": out_cps, "summary": s,
         }
 
@@ -125,10 +132,14 @@ def heatmap(plan_id: str, hours: int = 48, spacing_mi: float = 20.0, lateral_mi:
     end = departure + timedelta(hours=hours)
     times, hourly = services.fetch_hourly(points, departure, end)
     i0 = services.nearest_index(times, departure)
-    hour_labels = [(departure + timedelta(hours=h)).isoformat() for h in range(hours + 1)]
+    # Slider step h shows forecast hour times[i0 + h] (the same "nearest hour" rule as checkpoint ETAs);
+    # labels are those real forecast timestamps, and hours past the forecast horizon are dropped
+    # rather than silently repeating the last hour.
+    n = max(0, min(hours + 1, len(times) - i0)) if i0 >= 0 else 0
+    hour_labels = [times[i0 + h].isoformat() for h in range(n)]
     risk_m, wind_m, rain_m, snow_m = [], [], [], []
-    for h in range(hours + 1):
-        idx = min(i0 + h, len(times) - 1)
+    for h in range(n):
+        idx = i0 + h
         rr, ww, ra, sn = [], [], [], []
         for hp in hourly:
             wx = _weather_at(hp, idx)
@@ -138,6 +149,7 @@ def heatmap(plan_id: str, hours: int = 48, spacing_mi: float = 20.0, lateral_mi:
     return {
         "plan_id": plan_id,
         "points": [[round(lon, 4), round(lat, 4)] for lat, lon in points],
+        "departure": plan["departure"],
         "hours": hour_labels,
         "risk": risk_m, "wind_mph": wind_m, "rain_in_hr": rain_m, "snow_in_hr": snow_m,
     }
