@@ -73,3 +73,12 @@ CACHES = {'default': {
 ORS_API_KEY = os.environ.get('ORS_API_KEY', '')
 # Nominatim's usage policy requires an identifying User-Agent.
 HTTP_USER_AGENT = os.environ.get('HTTP_USER_AGENT', 'spotter-truck-routing/1.0 (https://github.com/spotter-truck-routing)')
+
+# Print errors (with tracebacks) to stdout so they show up in the host's logs.
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {'console': {'class': 'logging.StreamHandler'}},
+    'root': {'handlers': ['console'], 'level': 'INFO'},
+    'loggers': {'django.request': {'handlers': ['console'], 'level': 'ERROR', 'propagate': False}},
+}
