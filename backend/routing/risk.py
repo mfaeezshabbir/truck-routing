@@ -129,7 +129,7 @@ _CRITERIA = [
     ("No Travel miles", lambda s: f"{s.get('no_travel_miles', 0.0):.0f} mi"),
     ("Severe miles", lambda s: f"{s['severe_miles']:.0f} mi"),
     ("High miles", lambda s: f"{s['high_miles']:.0f} mi"),
-    ("avg risk", lambda s: f"{s['avg_risk']:.2f}"),
+    ("average risk", lambda s: f"{s['avg_risk']:.3f}"),
     ("travel time", lambda s: _fmt_duration(s["duration_s"])),
 ]
 

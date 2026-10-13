@@ -312,3 +312,49 @@ def test_ors_auth_error_falls_back_to_osrm(monkeypatch, settings):
     monkeypatch.setattr(services, "_osrm_routes", lambda o, d: (["osrm"], "osrm"))
     routes, provider = services.get_routes({"lon": -96.8, "lat": 32.78}, {"lon": -104.98, "lat": 39.74})
     assert routes == ["osrm"] and "OSRM" in provider
+
+
+def _client_weather(req, wind=5.0):
+    """What the browser would send back for a weather request: constant forecast at every point."""
+    w = req["weather"]
+    start = datetime.fromisoformat(w["start_hour"])
+    n = int((datetime.fromisoformat(w["end_hour"]) - start).total_seconds() // 3600) + 1
+    times = [(start + timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M") for h in range(n)]
+    z = [0.0] * n
+    return {"times": times, "hourly": [{"wind_speed_10m": [wind] * n, "wind_gusts_10m": z, "precipitation": z,
+                                        "rain": z, "showers": z, "snowfall": z} for _ in w["points"]]}
+
+
+@pytest.mark.django_db
+def test_two_step_plan_matches_one_step(client):
+    one = client.post("/api/plan", body(), format="json").data
+    req = client.post("/api/plan/prepare", body(), format="json").data
+    assert req["weather"]["params"]["precipitation_unit"] == "inch" and len(req["weather"]["points"]) > 0
+    two = client.post("/api/plan/score", {"plan_id": req["plan_id"], "weather": _client_weather(req)}, format="json")
+    assert two.status_code == 200, two.data
+    strip = lambda d: {k: v for k, v in d.items() if k != "plan_id"}  # noqa: E731
+    assert strip(two.data) == strip(one)
+
+
+@pytest.mark.django_db
+def test_two_step_rejects_bad_weather_and_unknown_plan(client):
+    req = client.post("/api/plan/prepare", body(), format="json").data
+    w = _client_weather(req)
+    w["hourly"] = w["hourly"][:-1]
+    r = client.post("/api/plan/score", {"plan_id": req["plan_id"], "weather": w}, format="json")
+    assert r.status_code == 400 and "points" in r.data["error"]
+    w = _client_weather(req)
+    w["hourly"][0]["wind_speed_10m"] = ["fast"] * len(w["times"])
+    assert client.post("/api/plan/score", {"plan_id": req["plan_id"], "weather": w}, format="json").status_code == 400
+    assert client.post("/api/plan/score", {"plan_id": "nope", "weather": w}, format="json").status_code == 404
+
+
+@pytest.mark.django_db
+def test_two_step_heatmap(client):
+    plan = client.post("/api/plan", body(), format="json").data
+    req = client.get(f"/api/heatmap/request?plan_id={plan['plan_id']}").data
+    r = client.post("/api/heatmap", {"plan_id": plan["plan_id"], "weather": _client_weather(req, wind=40)}, format="json")
+    assert r.status_code == 200, r.data
+    assert len(r.data["points"]) == len(req["weather"]["points"])
+    assert r.data["wind_mph"][0][0] == 40 and r.data["risk"][0][0] == 2  # 40 mph is High at 35,000 lb
+    assert client.get("/api/heatmap/request?plan_id=nope").status_code == 404

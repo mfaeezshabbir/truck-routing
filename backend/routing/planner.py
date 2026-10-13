@@ -1,6 +1,6 @@
 """Trip planning orchestration: routes -> checkpoints -> weather -> risk -> recommendation."""
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from django.core.cache import cache
 
@@ -40,7 +40,14 @@ def _reason(rank, order, summaries, routes):
     return f"{prefix} {name}: {label} {mine} vs {theirs}."
 
 
-def plan_trip(origin: str, destination: str, departure, load_lb: float, interval_mi: int) -> dict:
+PREP_TTL = 3600
+
+
+def prepare_trip(origin: str, destination: str, departure, load_lb: float, interval_mi: int) -> dict:
+    """Geocode, route, place checkpoints and work out ETAs. Everything except the weather.
+
+    The result is cached under its plan_id so the weather can be supplied by a later request.
+    """
     o = services.geocode(origin)
     d = services.geocode(destination)
     if geo.haversine_mi((o["lon"], o["lat"]), (d["lon"], d["lat"])) < 1.0:
@@ -78,8 +85,27 @@ def plan_trip(origin: str, destination: str, departure, load_lb: float, interval
         raise services.InputError(
             f"Trip would arrive {max_eta:%Y-%m-%d %H:%M} UTC, beyond the weather forecast horizon "
             f"({horizon:%Y-%m-%d %H:%M} UTC). Choose an earlier departure.")
-    times, hourly = services.fetch_hourly(all_points, departure, max_eta)
+    state = {
+        "plan_id": uuid.uuid4().hex, "provider": provider, "origin": o, "destination": d,
+        "departure": departure, "load_lb": load_lb, "interval_mi": interval_mi,
+        "routes": routes, "points": all_points, "max_eta": max_eta,
+    }
+    cache.set(f"prep:{state['plan_id']}", state, PREP_TTL)
+    return state
 
+
+def weather_request(state: dict) -> dict:
+    return {"plan_id": state["plan_id"],
+            "weather": services.weather_request(state["points"], state["departure"], state["max_eta"])}
+
+
+def load_prepared(plan_id: str) -> dict | None:
+    return cache.get(f"prep:{plan_id}")
+
+
+def score_trip(state: dict, times, hourly) -> dict:
+    """Apply hourly forecasts (one per checkpoint, in state['points'] order) and rank the routes."""
+    routes, departure, load_lb = state["routes"], state["departure"], state["load_lb"]
     summaries = []
     for idx, r in enumerate(routes):
         cps = r["checkpoints"]
@@ -121,7 +147,7 @@ def plan_trip(origin: str, destination: str, departure, load_lb: float, interval
         out_routes.append(ro)
     out_routes.sort(key=lambda x: x["id"])
 
-    plan_id = uuid.uuid4().hex
+    plan_id = state["plan_id"]
     cache.set(f"plan:{plan_id}", {
         "departure": departure.isoformat(), "load_lb": load_lb,
         "lines": [r["raw"]["coords"] for r in routes],
@@ -130,23 +156,27 @@ def plan_trip(origin: str, destination: str, departure, load_lb: float, interval
     all_blocked = all(s["has_no_travel"] for s in summaries)
     return {
         "plan_id": plan_id,
-        "provider": provider,
-        "origin": o, "destination": d,
-        "departure": departure.isoformat(), "load_lb": load_lb, "interval_mi": interval_mi,
+        "provider": state["provider"],
+        "origin": state["origin"], "destination": state["destination"],
+        "departure": departure.isoformat(), "load_lb": load_lb, "interval_mi": state["interval_mi"],
         "recommended_route_id": None if all_blocked else order[0],
         "warning": "Every route has No Travel conditions; consider delaying departure." if all_blocked else None,
         "routes": out_routes,
     }
 
 
-def heatmap(plan_id: str, hours: int = 48, spacing_mi: float = 20.0, lateral_mi: float = 30.0) -> dict | None:
-    plan = cache.get(f"plan:{plan_id}")
-    if not plan:
-        return None
-    from datetime import datetime
-    departure = datetime.fromisoformat(plan["departure"])
-    load_lb = plan["load_lb"]
+def plan_trip(origin: str, destination: str, departure, load_lb: float, interval_mi: int) -> dict:
+    """One-step planning with the server fetching the weather itself."""
+    state = prepare_trip(origin, destination, departure, load_lb, interval_mi)
+    times, hourly = services.fetch_hourly(state["points"], departure, state["max_eta"])
+    return score_trip(state, times, hourly)
 
+
+HEAT_HOURS = 48
+
+
+def _heat_grid(plan: dict, spacing_mi: float = 20.0, lateral_mi: float = 30.0):
+    """Points on and either side of every route (de-duplicated), and the disc radius to draw them with."""
     total = sum(geo.cumulative(l, [])[0][-1] for l in plan["lines"])
     # Keep the grid to roughly 450 points or fewer.
     spacing = max(spacing_mi, total / 150)
@@ -167,9 +197,33 @@ def heatmap(plan_id: str, hours: int = 48, spacing_mi: float = 20.0, lateral_mi:
             for lon, lat in cands:
                 keyc = (round(lat / cell), round(lon / cell))
                 grid.setdefault(keyc, (lat, lon))
-    points = list(grid.values())
-    end = departure + timedelta(hours=hours)
-    times, hourly = services.fetch_hourly(points, departure, end)
+    return list(grid.values()), radius_mi
+
+
+def heatmap_request(plan_id: str) -> dict | None:
+    """What a client needs to fetch the heatmap's forecast itself."""
+    plan = cache.get(f"plan:{plan_id}")
+    if not plan:
+        return None
+    points, _ = _heat_grid(plan)
+    departure = datetime.fromisoformat(plan["departure"])
+    return {"plan_id": plan_id,
+            "weather": services.weather_request(points, departure, departure + timedelta(hours=HEAT_HOURS))}
+
+
+def heatmap(plan_id: str, weather: dict | None = None) -> dict | None:
+    """Hourly corridor grid for 0-48 h. `weather` is client-fetched data; without it the server fetches."""
+    plan = cache.get(f"plan:{plan_id}")
+    if not plan:
+        return None
+    departure = datetime.fromisoformat(plan["departure"])
+    load_lb = plan["load_lb"]
+    points, radius_mi = _heat_grid(plan)
+    if weather is None:
+        times, hourly = services.fetch_hourly(points, departure, departure + timedelta(hours=HEAT_HOURS))
+    else:
+        times, hourly = services.parse_client_weather(weather, len(points))
+    hours = HEAT_HOURS
     i0 = services.nearest_index(times, departure)
     # Slider step h is forecast hour times[i0 + h]. Hours past the forecast horizon are dropped.
     n = max(0, min(hours + 1, len(times) - i0)) if i0 >= 0 else 0

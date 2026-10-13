@@ -45,6 +45,14 @@ wrong weather. On Chicago to Denver that's the difference between arriving in 23
 
 Forecasts are hourly, so a 2:40 arrival blends the 2:00 and 3:00 values instead of rounding.
 
+## Why your browser fetches the weather
+
+Open-Meteo is free, but the limit is per IP address. A free Render server shares its IP with thousands of
+other apps, and on day one the quota was already gone before this app made a single call. So the backend
+does everything except download the forecast: it works out the routes, checkpoints and ETAs, tells the
+browser exactly which forecast to fetch, and scores whatever comes back. Each visitor uses their own quota,
+and the backend never touches Open-Meteo in production.
+
 ## Getting three routes
 
 OpenRouteService has a proper truck profile, and I pass it the real gross weight (load plus about
@@ -101,17 +109,23 @@ so the slider never waits on the server.
 
 ## API
 
-`POST /api/plan`
+The app plans in two steps:
 
-```json
-{"origin": "Dallas, TX", "destination": "Denver, CO", "departure": "2026-10-14T13:00:00Z",
- "load_lb": 35000, "interval_mi": 25}
-```
+1. `POST /api/plan/prepare` with
+   ```json
+   {"origin": "Dallas, TX", "destination": "Denver, CO", "departure": "2026-10-14T13:00:00Z",
+    "load_lb": 35000, "interval_mi": 25}
+   ```
+   returns a `plan_id` and the Open-Meteo query to run (points, hours, units).
+2. `POST /api/plan/score` with `{plan_id, weather: {times, hourly}}` returns the routes, checkpoints with
+   weather and risk, rest stops, and the pick.
 
-Returns the routes, checkpoints with weather and risk, rest stops, and the pick.
+The heatmap works the same way: `GET /api/heatmap/request?plan_id=...`, then `POST /api/heatmap`.
 
-`GET /api/heatmap?plan_id=...` returns the weather layer. Bad input (unknown city, departure in the
-past) gets a 400 with a readable message.
+`POST /api/plan` and `GET /api/heatmap` still exist and do it all in one go with the server fetching the
+weather. Handy locally, useless on a shared IP.
+
+Bad input (unknown city, departure in the past, malformed weather) gets a 400 with a readable message.
 
 ## Deploy
 
@@ -123,4 +137,5 @@ to Vercel via `frontend/vercel.json`. Set `VITE_API_BASE` to the backend URL.
 - A storm that sits between two checkpoints. Use 10 mile spacing if you're worried.
 - Trips that end more than about 16 days out. That's as far as the forecast goes.
 - Seasonal closures. The Khunjerab Pass is shut in winter and the router has no idea.
-- Heavy traffic. It runs on free public APIs with rate limits.
+- Heavy traffic. It runs on free public APIs with rate limits. A visitor who plans a lot of long trips in
+  one day can still run out of their own Open-Meteo quota.

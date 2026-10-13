@@ -250,14 +250,63 @@ def _hour_floor(dt):
     return dt.replace(minute=0, second=0, microsecond=0)
 
 
+def forecast_window(start: datetime, end: datetime) -> tuple[str, str]:
+    """Open-Meteo `start_hour` / `end_hour` covering start..end (UTC), clipped to the forecast horizon."""
+    start = _hour_floor(start.astimezone(timezone.utc))
+    end = min(_hour_floor(end.astimezone(timezone.utc)) + timedelta(hours=1), forecast_horizon())
+    return start.strftime("%Y-%m-%dT%H:%M"), end.strftime("%Y-%m-%dT%H:%M")
+
+
+def weather_request(points, start: datetime, end: datetime) -> dict:
+    """What a client needs to fetch the forecast itself (same query the server would make)."""
+    start_hour, end_hour = forecast_window(start, end)
+    return {
+        "points": [[round(p[0], 3), round(p[1], 3)] for p in points],
+        "start_hour": start_hour, "end_hour": end_hour,
+        "params": {"hourly": HOURLY, "wind_speed_unit": "mph", "precipitation_unit": "inch", "timezone": "GMT"},
+    }
+
+
+def parse_client_weather(data, n_points: int):
+    """Validate forecast data sent by a browser: {"times": [...], "hourly": [{var: [...]}, ...]}.
+
+    Returns (times, per_point) in the same shape as fetch_hourly.
+    """
+    if not isinstance(data, dict):
+        raise InputError("Weather data is missing.")
+    raw_times, hourly = data.get("times"), data.get("hourly")
+    if not isinstance(raw_times, list) or not raw_times or not isinstance(hourly, list):
+        raise InputError("Weather data must have 'times' and 'hourly' lists.")
+    if len(hourly) != n_points:
+        raise InputError(f"Expected weather for {n_points} points, got {len(hourly)}.")
+    try:
+        times = [datetime.fromisoformat(t).replace(tzinfo=timezone.utc) for t in raw_times]
+    except (TypeError, ValueError):
+        raise InputError("Weather times must be ISO timestamps.")
+    wanted = HOURLY.split(",")
+    per_point = []
+    for h in hourly:
+        if not isinstance(h, dict):
+            raise InputError("Each point's weather must be an object.")
+        clean = {}
+        for var in wanted:
+            series = h.get(var)
+            if series is None:
+                continue
+            if not isinstance(series, list) or len(series) != len(times) or                     not all(v is None or isinstance(v, (int, float)) for v in series):
+                raise InputError(f"Weather '{var}' must be a list of {len(times)} numbers.")
+            clean[var] = series
+        per_point.append(clean)
+    return times, per_point
+
+
 def fetch_hourly(points, start: datetime, end: datetime):
     """Hourly forecast for many (lat, lon) points between start and end (UTC).
 
     Returns (times: list[datetime], per_point: list[dict[var -> list]]).
     Snowfall is requested in inches (precipitation_unit=inch); hourly values are per hour = in/hr.
     """
-    start = _hour_floor(start.astimezone(timezone.utc))
-    end = min(_hour_floor(end.astimezone(timezone.utc)) + timedelta(hours=1), forecast_horizon())
+    start_hour, end_hour = forecast_window(start, end)
     sess = _session()
     results = []
     times = None
@@ -270,8 +319,8 @@ def fetch_hourly(points, start: datetime, end: datetime):
             "wind_speed_unit": "mph",
             "precipitation_unit": "inch",
             "timezone": "GMT",
-            "start_hour": start.strftime("%Y-%m-%dT%H:%M"),
-            "end_hour": end.strftime("%Y-%m-%dT%H:%M"),
+            "start_hour": start_hour,
+            "end_hour": end_hour,
         }
         for attempt in range(3):  # Open-Meteo intermittently answers 429/503 "overloaded"
             r = sess.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=60)
