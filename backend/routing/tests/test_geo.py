@@ -16,3 +16,10 @@ def test_sample_along_interval_and_eta():
 def test_segment_miles_sum_to_total():
     marks = [0, 25, 50, 60]
     assert sum(geo.segment_miles(marks)) == pytest.approx(60)
+
+
+def test_point_at_elapsed_interpolates_by_time():
+    coords = [(0, 0), (0, 1), (0, 2)]
+    cm, cs = geo.cumulative(coords, [3600, 1800])  # second degree is driven twice as fast
+    p = geo.point_at_elapsed(coords, cm, cs, 4500, total_duration_s=5400)
+    assert p["lat"] == pytest.approx(1.5) and p["mile"] == pytest.approx(cm[-1] * 0.75)

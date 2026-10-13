@@ -12,6 +12,9 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 import os
+import tempfile
+
+from django.core.management.utils import get_random_secret_key
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -20,7 +23,6 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
 def _load_dotenv(path):
     """Minimal backend/.env loader (KEY=VALUE lines); real environment variables take precedence."""
     if not path.exists():
@@ -34,10 +36,11 @@ def _load_dotenv(path):
 
 _load_dotenv(BASE_DIR / '.env')
 
-SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY') or 'django-insecure-fm!f9m$z)g00i58ng-9_4m%#b0@ioq!!7b!c3h-je4@8z_n=o-'
+# Debug is opt-in (DJANGO_DEBUG=1 in backend/.env for local work).
+DEBUG = os.environ.get('DJANGO_DEBUG', '0') == '1'
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.environ.get('DJANGO_DEBUG', '1') == '1'
+# No sessions/auth are used, so without a configured key a random per-process key is safe.
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY') or get_random_secret_key()
 
 ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', '*').split(',')
 
@@ -147,6 +150,13 @@ if _cors:
 else:
     CORS_ALLOW_ALL_ORIGINS = True
 REST_FRAMEWORK = {'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer']}
-CACHES = {'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache', 'TIMEOUT': 1800}}
+# File-based so every gunicorn worker on the host sees the same plans (POST /api/plan and the follow-up
+# GET /api/heatmap can land on different workers).
+CACHES = {'default': {
+    'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
+    'LOCATION': os.environ.get('CACHE_DIR') or os.path.join(tempfile.gettempdir(), 'spotter-truck-routing-cache'),
+    'TIMEOUT': 1800,
+    'OPTIONS': {'MAX_ENTRIES': 2000},
+}}
 ORS_API_KEY = os.environ.get('ORS_API_KEY', '')
 HTTP_USER_AGENT = os.environ.get('HTTP_USER_AGENT', 'spotter-truck-routing/1.0 (https://github.com/spotter-truck-routing)')

@@ -19,12 +19,13 @@ python3 -m venv venv && . venv/bin/activate
 pip install -r requirements.txt
 export ORS_API_KEY=...          # optional; see "Routing" below
 python manage.py runserver 8000
-pytest -q                        # unit + API tests (risk, load, recommendation, sampling, errors, heatmap)
+pytest -q                        # unit + API tests (risk, load, recommendation, HOS, sampling, errors, heatmap)
 
 # frontend (dev server proxies /api -> :8000)
 cd frontend
 npm install
 npm run dev                      # http://localhost:5173
+npm test                         # vitest (heatmap colour bands match the API's risk bands)
 npm run build                    # production build in dist/
 ```
 For a deployed frontend set `VITE_API_BASE=https://<backend-host>`; for the backend set
@@ -37,13 +38,20 @@ For a deployed frontend set `VITE_API_BASE=https://<backend-host>`; for the back
 {"origin":"Dallas, TX","destination":"Denver, CO","departure":"2026-10-14T13:00:00Z","load_lb":35000,"interval_mi":25}
 ```
 Returns `plan_id`, geocoded origin/destination, `recommended_route_id`, and `routes[]` with geometry,
-distance, duration, arrival, `checkpoints[]` (lat/lon, mile, ETA, forecast hour used, wind/gust/rain/snow, risk
-level + driving factors) and `summary` (miles per risk level, severe/high miles, mileage-weighted average risk,
-max level, `has_no_travel`), plus `rank` and `recommended`.
+distance, `duration_s` (driving), `trip_duration_s` (driving + HOS stops), arrival, `stops[]` (HOS break/rest:
+kind, position, mile, start/end), `checkpoints[]` (lat/lon, mile, ETA, nearest forecast hour, wind/gust/rain/snow,
+risk level + driving factors) and `summary` (miles per risk level, severe/high miles, mileage-weighted average risk,
+max level, `has_no_travel`), plus `rank`, `recommended` and `reason` (e.g. "Recommended over Route B: Severe miles
+0 vs 38.").
 
 `GET /api/heatmap?plan_id=...` — a corridor grid (points on and ~30 mi either side of every route, de-duplicated)
-with hourly risk / wind / rain / snow for hours 0–48 after departure. Fetched once per plan; the slider is fully
-client-side (each hour is a feature property and only the heatmap paint expression changes, so no data re-upload).
+with hourly risk / wind / rain / snow for hours 0–48 after departure, plus `radius_mi` (ground radius of each
+point's disc). Fetched once per plan; the slider is fully client-side (each hour is a feature property and only a
+paint/sort expression changes, so no data is re-sent from the main thread).
+
+The heatmap is drawn as blurred discs **coloured by the risk band of the value at that point** (the spec's thresholds
+for the chosen metric, same colours as checkpoints; Risk includes the load rules), not by point density, so a
+colour always means a level. Disc size is in ground miles, so the corridor looks the same at every zoom.
 
 `GET /health` and `GET /api/health` → `{"ok": true}`
 
@@ -58,22 +66,32 @@ MapLibre worker: Vite pre-bundling breaks maplibre-gl's default worker URL, so `
 | Routing fallback | **OSRM public demo** (`router.project-osrm.org`, `alternatives=3`) | car profile; demo often returns <3 alternatives, so extra alternatives are synthesised by forcing a via-point offset perpendicular at the trip midpoint (10% / 18% / 30% of the straight-line distance, each side), keeping only candidates ≤1.6× the fastest duration that overlap existing routes <80% |
 | Weather | **Open-Meteo** hourly forecast, multi-location batch (100 points/request) | `wind_speed_unit=mph`, `precipitation_unit=inch` (so snowfall is inches/hour) |
 
-Responses (geocodes, routes) are cached in memory; a plan's route lines are cached for 1 h for the heatmap call.
+Responses (geocodes, routes) and a plan's route lines (for the heatmap call, 1 h) are kept in Django's
+**file-based cache** (`CACHE_DIR`, default the OS temp dir), so all gunicorn workers on a host share them; a
+per-process memory cache would 404 the heatmap whenever it hit a different worker than the plan.
+All geocoders are limited to the US, Canada and Mexico.
 
 ## Logic
 
 1. Geocode, fetch up to 3 routes.
 2. Checkpoints at mile 0, every N miles (10/25/50), and the destination.
-3. ETA = departure + cumulative route duration at that point. Per-segment durations come from OSRM
-   annotations / ORS step durations (so slow city stretches are respected), interpolated within a segment and
-   scaled to the engine's total duration.
-4. All checkpoints of all routes are fetched in one batched Open-Meteo call; the forecast hour **nearest** the ETA is used.
-5. Checkpoint risk = worst of wind / rain / snow levels, then the load rules can only raise it.
-6. Route summary is **mileage-weighted**: each checkpoint represents half the distance to each neighbour
+3. Driving time to each point = cumulative route duration. Per-segment durations come from OSRM annotations /
+   ORS step durations (so slow city stretches are respected), interpolated within a segment and scaled to the
+   engine's total duration.
+4. **Hours of service.** ETA = departure + driving time + the HOS stops already taken: a 30-min break after 8 h of
+   driving and a 10-h off-duty rest after 11 h (which resets the break clock); simplified FMCSA rules for a solo
+   driver starting fresh (14-h window never binds; 60/70-h weekly limit ignored). Stops are returned with their
+   position and shown on the map and in the checkpoint table; arrival and "Trip" time include them.
+5. All checkpoints of all routes are fetched in one batched Open-Meteo call; each value is **linearly interpolated**
+   between the two forecast hours around the ETA.
+6. Checkpoint risk = worst of wind / rain / snow levels, then the load rules can only raise it.
+7. Route summary is **mileage-weighted**: each checkpoint represents half the distance to each neighbour
    (so at 25 mi interior checkpoints each represent 25 mi, the endpoints 12.5 mi, and the sum equals route length).
-7. Ranking: routes with any No Travel checkpoint last (and never "Recommended"; among them fewest No Travel miles first), then fewest Severe miles,
+8. Ranking: routes with any No Travel checkpoint last (and never "Recommended"; among them fewest No Travel miles first), then fewest Severe miles,
    fewest High miles, lowest average risk, shortest travel time. If every route has No Travel, no route is
-   recommended and a warning suggests delaying departure.
+   recommended and a warning suggests delaying departure. "Travel time" is the trip time including HOS stops.
+   Each route carries a `reason`: the first ranking criterion that separates it from the top route (for the top
+   route: from the runner-up).
 
 ### Assumptions
 * **Overlapping/gapped bins.** The table uses ranges like 25–34 / 35–44 mph and 0.10–0.25 / 0.25–0.50 in.
@@ -100,6 +118,10 @@ Responses (geocodes, routes) are cached in memory; a plan's route lines are cach
   checkpoints/ETAs still use full-resolution lines. MapLibre is lazy-loaded in its own chunk (initial JS ≈ 73 kB gzip).
 
 ## Gaps / next steps
-* Without an ORS key the routes come from OSRM's **car** profile (no truck restrictions); set `ORS_API_KEY` for HGV.
+* Without an ORS key the routes come from OSRM's **car** profile (no truck restrictions, car speeds, so ETAs are
+  optimistic); set `ORS_API_KEY` for HGV.
+* Alternatives on long trips are synthesised via a perpendicular detour point at the midpoint (ORS only returns
+  engine alternatives under 100 km), so they are plausible corridors rather than "official" alternatives.
+* Wind risk uses sustained wind; gusts are shown but not scored (the spec gives one wind threshold set).
 * Public demo servers (OSRM, Nominatim) are rate-limited and not for production load.
-* In-memory cache is per process; use Redis for multi-worker deployments.
+* The file cache is per host; use Redis if the backend is scaled to several instances.

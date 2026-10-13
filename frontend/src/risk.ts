@@ -11,6 +11,10 @@ export const fmtDuration = (s: number) => {
 }
 export const fmtTime = (iso: string) =>
   new Date(iso).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })
+/** Compact local time for tables, e.g. "Tue 16:00" (the zone is shown in the column header). */
+export const fmtShort = (iso: string) =>
+  new Date(iso).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false })
+export const LOCAL_TZ_ABBR = new Date().toLocaleTimeString(undefined, { timeZoneName: 'short' }).split(' ').pop()
 
 /** The browser's IANA zone: departures are entered and all times displayed in it. */
 export const LOCAL_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone

@@ -118,6 +118,30 @@ def recommendation_key(summary: dict):
     )
 
 
+def _fmt_duration(s: float) -> str:
+    m = round(s / 60)
+    return f"{m // 60}h {m % 60:02d}m"
+
+
+# One entry per element of recommendation_key: (criterion label, formatter of the summary value).
+_CRITERIA = [
+    ("No Travel conditions", lambda s: "yes" if s["has_no_travel"] else "none"),
+    ("No Travel miles", lambda s: f"{s.get('no_travel_miles', 0.0):.0f} mi"),
+    ("Severe miles", lambda s: f"{s['severe_miles']:.0f} mi"),
+    ("High miles", lambda s: f"{s['high_miles']:.0f} mi"),
+    ("avg risk", lambda s: f"{s['avg_risk']:.2f}"),
+    ("travel time", lambda s: _fmt_duration(s["duration_s"])),
+]
+
+
+def deciding_criterion(a: dict, b: dict):
+    """First ranking criterion on which summaries a and b differ: (label, a_value, b_value), or None if tied."""
+    for (label, fmt), ka, kb in zip(_CRITERIA, recommendation_key(a), recommendation_key(b)):
+        if ka != kb:
+            return label, fmt(a), fmt(b)
+    return None
+
+
 def rank_routes(summaries: list[dict]) -> list[int]:
     """Return indices of summaries ordered best-first."""
     return sorted(range(len(summaries)), key=lambda i: recommendation_key(summaries[i]))

@@ -4,7 +4,7 @@ from datetime import timedelta
 
 from django.core.cache import cache
 
-from . import geo, risk, services
+from . import geo, hos, risk, services
 
 ROUTE_COLORS = ["#2563eb", "#9333ea", "#ea580c"]
 
@@ -18,6 +18,26 @@ def _weather_at(h, i):
         "rain_in_hr": round(rain, 3),
         "snow_in_hr": round(services.val(h.get("snowfall"), i), 3),
     }
+
+
+def _reason(rank, order, summaries, routes):
+    """Why a route sits where it does: the first ranking criterion separating it from its neighbour."""
+    i = order[rank]
+    if len(order) == 1:
+        return "Only route found."
+    other = order[1] if rank == 0 else order[0]
+    name = routes[other]["out"]["name"]
+    if rank > 0:
+        prefix = "Ranked below"
+    elif summaries[i]["has_no_travel"]:
+        prefix = "Least bad, ranked above"
+    else:
+        prefix = "Recommended over"
+    crit = risk.deciding_criterion(summaries[i], summaries[other])
+    if crit is None:
+        return f"Tied with {name} on every criterion."
+    label, mine, theirs = crit
+    return f"{prefix} {name}: {label} {mine} vs {theirs}."
 
 
 def plan_trip(origin: str, destination: str, departure, load_lb: float, interval_mi: int) -> dict:
@@ -34,11 +54,23 @@ def plan_trip(origin: str, destination: str, departure, load_lb: float, interval
     for idx, rr in enumerate(raw_routes):
         cm, cs = geo.cumulative(rr["coords"], rr["seg_durations"])
         cps = geo.sample_along(rr["coords"], cm, cs, interval_mi, rr["duration_s"])
+        # ETAs are clock times: driving time plus the HOS breaks/rests taken before reaching the point.
+        stops = hos.plan_stops(rr["duration_s"])
         for cp in cps:
-            cp["eta"] = departure + timedelta(seconds=cp["elapsed_s"])
+            cp["eta"] = departure + timedelta(seconds=hos.wall_elapsed(cp["elapsed_s"], stops))
             cp["_wx"] = len(all_points)
             all_points.append((cp["lat"], cp["lon"]))
-        routes.append({"raw": rr, "checkpoints": cps})
+        out_stops = []
+        for st in stops:
+            pos = geo.point_at_elapsed(rr["coords"], cm, cs, st["drive_s"], rr["duration_s"])
+            start = departure + timedelta(seconds=hos.wall_elapsed(st["drive_s"], stops))
+            out_stops.append({
+                "kind": st["kind"], "lat": round(pos["lat"], 5), "lon": round(pos["lon"], 5),
+                "mile": round(pos["mile"], 1), "duration_s": st["duration_s"],
+                "start": start.isoformat(), "end": (start + timedelta(seconds=st["duration_s"])).isoformat(),
+            })
+        trip_s = hos.wall_elapsed(rr["duration_s"], stops)
+        routes.append({"raw": rr, "checkpoints": cps, "stops": out_stops, "trip_s": trip_s})
 
     max_eta = max(r["checkpoints"][-1]["eta"] for r in routes)
     horizon = services.forecast_horizon()
@@ -54,8 +86,10 @@ def plan_trip(origin: str, destination: str, departure, load_lb: float, interval
         seg = geo.segment_miles([c["mile"] for c in cps])
         segments, out_cps = [], []
         for c, miles in zip(cps, seg):
-            hi = services.nearest_index(times, c["eta"])
-            wx = _weather_at(hourly[c["_wx"]], hi)
+            # Weather is interpolated between the two forecast hours around the ETA.
+            x = services.fractional_index(times, c["eta"])
+            hi = round(x)
+            wx = _weather_at(hourly[c["_wx"]], x)
             rk = risk.checkpoint_risk(wx["wind_mph"], wx["rain_in_hr"], wx["snow_in_hr"], load_lb)
             segments.append(risk.Segment(miles, rk["level"]))
             out_cps.append({
@@ -64,13 +98,15 @@ def plan_trip(origin: str, destination: str, departure, load_lb: float, interval
                 "eta": c["eta"].isoformat(), "forecast_hour": times[hi].isoformat() if hi >= 0 else None,
                 "weather": wx, "risk": rk,
             })
-        s = risk.summarize(segments, r["raw"]["duration_s"])
+        s = risk.summarize(segments, r["trip_s"])
         summaries.append(s)
         r["out"] = {
             "id": idx, "name": f"Route {chr(65 + idx)}", "color": ROUTE_COLORS[idx % 3],
             "distance_mi": round(r["raw"]["distance_m"] / geo.METERS_PER_MILE, 1),
-            "duration_s": round(r["raw"]["duration_s"]),
-            "arrival": (departure + timedelta(seconds=r["raw"]["duration_s"])).isoformat(),
+            "duration_s": round(r["raw"]["duration_s"]),  # driving time
+            "trip_duration_s": round(r["trip_s"]),  # driving + HOS breaks/rests
+            "arrival": (departure + timedelta(seconds=r["trip_s"])).isoformat(),
+            "stops": r["stops"],
             "geometry": {"type": "LineString", "coordinates": [[round(x, 5), round(y, 5)] for x, y in geo.simplify(r["raw"]["coords"])]},
             "checkpoints": out_cps, "summary": s,
         }
@@ -81,6 +117,7 @@ def plan_trip(origin: str, destination: str, departure, load_lb: float, interval
         ro = routes[i]["out"]
         ro["rank"] = rank + 1
         ro["recommended"] = rank == 0 and not summaries[i]["has_no_travel"]
+        ro["reason"] = _reason(rank, order, summaries, routes)
         out_routes.append(ro)
     out_routes.sort(key=lambda x: x["id"])
 
@@ -113,6 +150,8 @@ def heatmap(plan_id: str, hours: int = 48, spacing_mi: float = 20.0, lateral_mi:
     total = sum(geo.cumulative(l, [])[0][-1] for l in plan["lines"])
     # keep the grid around <=450 points
     spacing = max(spacing_mi, total / 150)
+    # Each point is drawn as a disc wide enough to overlap its neighbours (along the route and sideways).
+    radius_mi = 0.9 * max(spacing, lateral_mi)
     grid = {}
     cell = spacing / 69.0 * 0.8  # degrees, for de-duplication
     for line in plan["lines"]:
@@ -149,6 +188,7 @@ def heatmap(plan_id: str, hours: int = 48, spacing_mi: float = 20.0, lateral_mi:
     return {
         "plan_id": plan_id,
         "points": [[round(lon, 4), round(lat, 4)] for lat, lon in points],
+        "radius_mi": round(radius_mi, 1),
         "departure": plan["departure"],
         "hours": hour_labels,
         "risk": risk_m, "wind_mph": wind_m, "rain_in_hr": rain_m, "snow_in_hr": snow_m,

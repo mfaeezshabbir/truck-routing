@@ -73,3 +73,14 @@ def test_rank_high_then_avg_then_time():
 
 def test_rank_no_travel_last():
     assert risk.rank_routes([_s(nt=True), _s(severe=50, high=50, avg=2.5, dur=9999)]) == [1, 0]
+
+
+def _sum(severe=0.0, high=0.0, avg=0.5, dur=3600, nt=0.0):
+    return {"has_no_travel": nt > 0, "no_travel_miles": nt, "severe_miles": severe, "high_miles": high,
+            "avg_risk": avg, "duration_s": dur}
+
+
+def test_deciding_criterion_names_first_difference():
+    assert risk.deciding_criterion(_sum(severe=0, high=50), _sum(severe=38)) == ("Severe miles", "0 mi", "38 mi")
+    assert risk.deciding_criterion(_sum(dur=7200), _sum(dur=3600))[0] == "travel time"
+    assert risk.deciding_criterion(_sum(), _sum()) is None

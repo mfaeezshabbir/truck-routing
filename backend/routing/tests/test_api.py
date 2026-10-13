@@ -255,3 +255,46 @@ def test_ors_unroutable_endpoint_is_input_error(monkeypatch, settings):
     monkeypatch.setattr(services, "_session", lambda: S())
     with pytest.raises(services.InputError):
         services._ors_routes({"lon": -96.8, "lat": 32.78}, {"lon": -97.33, "lat": 32.75})
+
+
+@pytest.mark.django_db
+def test_hos_stops_shift_etas_and_arrival(client, monkeypatch):
+    def routes(o, d, load_lb=0.0):
+        coords = [[o["lon"], o["lat"] + i * 10 / 100] for i in range(101)]  # ~690 mi, 12 h of driving
+        dur = 12 * 3600.0
+        return [{"coords": coords, "seg_durations": [dur / 100] * 100, "distance_m": 690 * geo.METERS_PER_MILE,
+                 "duration_s": dur}], "fake"
+    monkeypatch.setattr(services, "get_routes", routes)
+    r = client.post("/api/plan", body(interval_mi=50), format="json").data["routes"][0]
+    assert [s["kind"] for s in r["stops"]] == ["break", "rest"]
+    assert r["duration_s"] == 12 * 3600 and r["trip_duration_s"] == 12 * 3600 + 1800 + 36000
+    dep = datetime.fromisoformat(r["checkpoints"][0]["eta"])
+    assert datetime.fromisoformat(r["arrival"]) - dep == timedelta(seconds=r["trip_duration_s"])
+    assert datetime.fromisoformat(r["checkpoints"][-1]["eta"]) == datetime.fromisoformat(r["arrival"])
+    assert r["stops"][0]["mile"] == pytest.approx(690 * 8 / 12, abs=1)
+
+
+@pytest.mark.django_db
+def test_weather_interpolated_between_forecast_hours(client, monkeypatch):
+    def fetch(points, start, end):
+        start = start.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        n = int((end - start).total_seconds() // 3600) + 2
+        times = [start + timedelta(hours=h) for h in range(n)]
+        z = [0] * n
+        return times, [{"wind_speed_10m": [h * 10.0 for h in range(n)], "wind_gusts_10m": z, "precipitation": z,
+                        "rain": z, "showers": z, "snowfall": z} for _ in points]
+    monkeypatch.setattr(services, "fetch_hourly", fetch)
+    r = client.post("/api/plan", body(), format="json").data  # departs at :40
+    assert r["routes"][0]["checkpoints"][0]["weather"]["wind_mph"] == pytest.approx(40 / 6, abs=0.1)
+
+
+@pytest.mark.django_db
+def test_routes_carry_reason(client):
+    r = client.post("/api/plan", body(), format="json").data
+    assert r["routes"][0]["reason"] == "Only route found."
+
+
+@pytest.mark.django_db
+def test_heatmap_reports_point_radius(client):
+    pid = client.post("/api/plan", body(), format="json").data["plan_id"]
+    assert client.get(f"/api/heatmap?plan_id={pid}").data["radius_mi"] >= 20

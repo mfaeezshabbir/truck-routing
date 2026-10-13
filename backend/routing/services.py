@@ -40,6 +40,9 @@ def _session():
 
 
 # ---------------------------------------------------------------- geocoding
+# All geocoders are limited to North America (US, Canada, Mexico) so "Paris" means Paris, TX.
+NA_BBOX = "-170,14,-50,72"
+
 def geocode(query: str) -> dict:
     key = "geo:" + hashlib.sha1(query.strip().lower().encode()).hexdigest()  # memcached-safe key
     hit = cache.get(key)
@@ -48,7 +51,7 @@ def geocode(query: str) -> dict:
     if settings.ORS_API_KEY:
         r = _session().get(
             "https://api.openrouteservice.org/geocode/search",
-            params={"api_key": settings.ORS_API_KEY, "text": query, "size": 1},
+            params={"api_key": settings.ORS_API_KEY, "text": query, "size": 1, "boundary.country": "US,CA,MX"},
             timeout=TIMEOUT,
         )
         if r.ok and r.json().get("features"):
@@ -71,7 +74,8 @@ def geocode(query: str) -> dict:
         log.warning("Nominatim failed: %s", e)
     if res is None:
         # Fallback: Photon (Komoot), also OSM-based and free.
-        r = _session().get("https://photon.komoot.io/api/", params={"q": query, "limit": 1}, timeout=TIMEOUT)
+        r = _session().get("https://photon.komoot.io/api/", params={"q": query, "limit": 1, "bbox": NA_BBOX},
+                           timeout=TIMEOUT)
         feats = r.json().get("features", []) if r.ok else []
         if not feats:
             raise InputError(f"Could not find location: {query}")
@@ -289,14 +293,26 @@ def fetch_hourly(points, start: datetime, end: datetime):
     return times or [], results
 
 
-def nearest_index(times, when: datetime) -> int:
+def fractional_index(times, when: datetime) -> float:
+    """Position of `when` on the hourly time axis (e.g. 3.25 = a quarter past times[3]), clamped; -1 if empty."""
     if not times:
         return -1
-    t0 = times[0]
-    idx = round((when - t0).total_seconds() / 3600)
-    return min(max(idx, 0), len(times) - 1)
+    x = (when - times[0]).total_seconds() / 3600
+    return min(max(x, 0.0), len(times) - 1.0)
+
+
+def nearest_index(times, when: datetime) -> int:
+    x = fractional_index(times, when)
+    return -1 if x < 0 else round(x)
 
 
 def val(series, i):
-    v = series[i] if series and 0 <= i < len(series) else None
+    """series[i] as float; a fractional i linearly interpolates between the two neighbouring hours."""
+    if not series:
+        return 0.0
+    lo = int(i)
+    if lo != i and 0 <= lo < len(series) - 1:
+        f = i - lo
+        return val(series, lo) * (1 - f) + val(series, lo + 1) * f
+    v = series[lo] if 0 <= lo < len(series) else None
     return float(v) if v is not None else 0.0

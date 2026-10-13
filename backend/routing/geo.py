@@ -1,4 +1,5 @@
 """Geometry helpers: distances, polyline sampling, offsets."""
+import bisect
 import math
 
 EARTH_MI = 3958.7613
@@ -50,6 +51,19 @@ def sample_along(coords, cum_miles, cum_secs, interval_mi, total_duration_s=None
         sec = (cum_secs[j] + (cum_secs[min(j + 1, len(cum_secs) - 1)] - cum_secs[j]) * f) * scale
         out.append({"lon": lon, "lat": lat, "mile": t, "elapsed_s": sec})
     return out
+
+
+def point_at_elapsed(coords, cum_miles, cum_secs, elapsed_s, total_duration_s=None):
+    """Position and mile mark reached after elapsed_s of driving (same duration scaling as sample_along)."""
+    scale = total_duration_s / cum_secs[-1] if total_duration_s and cum_secs[-1] > 0 else 1.0
+    t = elapsed_s / scale
+    j = bisect.bisect_right(cum_secs, t) - 1
+    j = min(max(j, 0), len(coords) - 2) if len(coords) > 1 else 0
+    span = cum_secs[j + 1] - cum_secs[j] if len(coords) > 1 else 0
+    f = 0.0 if span <= 0 else min(max((t - cum_secs[j]) / span, 0.0), 1.0)
+    a, b = coords[j], coords[min(j + 1, len(coords) - 1)]
+    mile = cum_miles[j] + (cum_miles[min(j + 1, len(cum_miles) - 1)] - cum_miles[j]) * f
+    return {"lon": a[0] + (b[0] - a[0]) * f, "lat": a[1] + (b[1] - a[1]) * f, "mile": mile}
 
 
 def segment_miles(marks):

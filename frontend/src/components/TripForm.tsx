@@ -14,7 +14,7 @@ export default function TripForm({ onSubmit, loading }: { onSubmit: (r: PlanRequ
   const [destination, setDestination] = useState('Denver, CO')
   const [departure, setDeparture] = useState(defaultDeparture())
   const [load, setLoad] = useState(35000)
-  const [interval, setInterval] = useState<10 | 25 | 50>(25)
+  const [intervalMi, setIntervalMi] = useState<10 | 25 | 50>(25)
   const [formError, setFormError] = useState<string | null>(null)
 
   const input = 'w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200'
@@ -27,7 +27,7 @@ export default function TripForm({ onSubmit, loading }: { onSubmit: (r: PlanRequ
         e.preventDefault()
         if (origin.trim().toLowerCase() === destination.trim().toLowerCase()) { setFormError('Origin and destination must differ.'); return }
         setFormError(null)
-        onSubmit({ origin, destination, departure: new Date(departure).toISOString(), load_lb: load, interval_mi: interval })
+        onSubmit({ origin, destination, departure: new Date(departure).toISOString(), load_lb: load, interval_mi: intervalMi })
       }}
     >
       <div><label htmlFor="origin" className={label}>Origin</label><input id="origin" autoComplete="off" className={input} value={origin} onChange={e => setOrigin(e.target.value)} required /></div>
@@ -41,8 +41,8 @@ export default function TripForm({ onSubmit, loading }: { onSubmit: (r: PlanRequ
         <span id="interval-label" className={label}>Weather checkpoint every</span>
         <div className="grid grid-cols-3 gap-2" role="group" aria-labelledby="interval-label">
           {([10, 25, 50] as const).map(v => (
-            <button type="button" key={v} onClick={() => setInterval(v)} aria-pressed={interval === v}
-              className={`rounded-lg border px-3 py-1.5 text-sm font-medium ${interval === v ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'}`}>
+            <button type="button" key={v} onClick={() => setIntervalMi(v)} aria-pressed={intervalMi === v}
+              className={`rounded-lg border px-3 py-1.5 text-sm font-medium ${intervalMi === v ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'}`}>
               {v} mi
             </button>
           ))}

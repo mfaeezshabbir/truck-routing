@@ -1,17 +1,16 @@
 import { Suspense, lazy, useRef, useState } from 'react'
 import { fetchHeatmap, fetchPlan } from './api'
-import type { Metric } from './components/MapView'
+import CheckpointList from './components/CheckpointList'
 import RouteCards from './components/RouteCards'
 import TripForm from './components/TripForm'
+import { METRICS, type Metric } from './metrics'
 import { RISK_COLORS, RISK_LABELS, fmtTime } from './risk'
-import type { Heatmap, Plan, PlanRequest } from './types'
+import type { Focus, Heatmap, Plan, PlanRequest } from './types'
 
 // MapLibre is ~1 MB: split it into its own chunk so the form/sidebar paint immediately.
 const MapView = lazy(() => import('./components/MapView'))
 
-const METRICS: { id: Metric; label: string }[] = [
-  { id: 'risk', label: 'Risk' }, { id: 'wind_mph', label: 'Wind' }, { id: 'rain_in_hr', label: 'Rain' }, { id: 'snow_in_hr', label: 'Snow' },
-]
+const METRIC_IDS = Object.keys(METRICS) as Metric[]
 
 export default function App() {
   const [plan, setPlan] = useState<Plan | null>(null)
@@ -23,13 +22,14 @@ export default function App() {
   const [hour, setHour] = useState(0)
   const [metric, setMetric] = useState<Metric>('risk')
   const [showHeat, setShowHeat] = useState(true)
+  const [focus, setFocus] = useState<Focus | null>(null)
 
   // Monotonic request id: responses of a superseded submit are ignored (no stale plan/heatmap).
   const reqId = useRef(0)
 
   const submit = async (req: PlanRequest) => {
     const id = ++reqId.current
-    setLoading(true); setError(null); setHeatmap(null); setHeatLoading(false)
+    setLoading(true); setError(null); setHeatmap(null); setHeatLoading(false); setFocus(null)
     try {
       const p = await fetchPlan(req)
       if (id !== reqId.current) return
@@ -46,6 +46,8 @@ export default function App() {
     }
   }
   const lastHour = heatmap ? heatmap.hours.length - 1 : 48
+  const selectedRoute = plan?.routes.find(r => r.id === selected)
+  const selectRoute = (id: number) => { setSelected(id); if (focus && focus.route !== id) setFocus(null) }
 
   return (
     <div className="flex h-full flex-col bg-slate-50 md:flex-row">
@@ -60,7 +62,8 @@ export default function App() {
         {plan && (
           <>
             <div className="text-[11px] text-slate-400">Routing: {plan.provider} · {plan.routes.reduce((a, r) => a + r.checkpoints.length, 0)} checkpoints every {plan.interval_mi} mi</div>
-            <RouteCards routes={plan.routes} selected={selected} onSelect={setSelected} />
+            <RouteCards routes={plan.routes} selected={selected} onSelect={selectRoute} />
+            {selectedRoute && <CheckpointList route={selectedRoute} focus={focus} onFocus={setFocus} />}
           </>
         )}
         <div className="mt-auto rounded-lg bg-slate-50 p-2 text-[11px] text-slate-500">
@@ -72,7 +75,7 @@ export default function App() {
       </aside>
       <main className="relative min-h-[420px] flex-1">
         <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-slate-400">Loading map…</div>}>
-          <MapView plan={plan} heatmap={heatmap} hour={Math.min(hour, lastHour)} metric={metric} showHeatmap={showHeat} selected={selected} onSelectRoute={setSelected} />
+          <MapView plan={plan} heatmap={heatmap} hour={Math.min(hour, lastHour)} metric={metric} showHeatmap={showHeat} selected={selected} onSelectRoute={selectRoute} focus={focus} onFocus={setFocus} />
         </Suspense>
         {plan && (
           <div className="absolute bottom-6 left-1/2 w-[min(640px,92%)] -translate-x-1/2 rounded-xl border border-slate-200 bg-white/95 p-3 shadow-lg backdrop-blur">
@@ -81,9 +84,9 @@ export default function App() {
                 <input type="checkbox" checked={showHeat} onChange={e => setShowHeat(e.target.checked)} /> Corridor heatmap
               </label>
               <div className="flex gap-1" role="group" aria-label="Heatmap metric">
-                {METRICS.map(m => (
-                  <button type="button" key={m.id} onClick={() => setMetric(m.id)} aria-pressed={metric === m.id}
-                    className={`rounded-md px-2 py-0.5 ${metric === m.id ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>{m.label}</button>
+                {METRIC_IDS.map(id => (
+                  <button type="button" key={id} onClick={() => setMetric(id)} aria-pressed={metric === id}
+                    className={`rounded-md px-2 py-0.5 ${metric === id ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>{METRICS[id].label}</button>
                 ))}
               </div>
             </div>
@@ -95,6 +98,12 @@ export default function App() {
                   <span>Departure</span>
                   <span className="font-semibold text-slate-800" aria-live="polite">+{Math.min(hour, lastHour)}h · {fmtTime(heatmap.hours[Math.min(hour, lastHour)])}</span>
                   <span>+{lastHour}h</span>
+                </div>
+                <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-slate-500" aria-label="Heatmap legend">
+                  <span className="font-medium text-slate-600">{METRICS[metric].label} ({METRICS[metric].unit}):</span>
+                  {METRICS[metric].legend.map((l, i) => (
+                    <span key={l} className="flex items-center gap-1"><span className="h-2 w-2 rounded-sm" style={{ background: RISK_COLORS[i] }} />{l}</span>
+                  ))}
                 </div>
               </>
             ) : <div className="text-xs text-slate-500">{heatLoading ? 'Loading 48h corridor forecast…' : 'Heatmap unavailable'}</div>}
