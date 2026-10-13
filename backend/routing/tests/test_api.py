@@ -298,3 +298,17 @@ def test_routes_carry_reason(client):
 def test_heatmap_reports_point_radius(client):
     pid = client.post("/api/plan", body(), format="json").data["plan_id"]
     assert client.get(f"/api/heatmap?plan_id={pid}").data["radius_mi"] >= 20
+
+
+def test_ors_auth_error_falls_back_to_osrm(monkeypatch, settings):
+    # ORS answers bad keys / quota with {"error": "<text>"}; that must not crash, it should use OSRM.
+    settings.ORS_API_KEY = "bad"
+
+    class S:
+        def post(self, *a, **k):
+            return _FakeResp(403, {"error": "Access to this API has been disallowed"})
+
+    monkeypatch.setattr(services, "_session", lambda: S())
+    monkeypatch.setattr(services, "_osrm_routes", lambda o, d: (["osrm"], "osrm"))
+    routes, provider = services.get_routes({"lon": -96.8, "lat": 32.78}, {"lon": -104.98, "lat": 39.74})
+    assert routes == ["osrm"] and "OSRM" in provider

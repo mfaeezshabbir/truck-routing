@@ -112,10 +112,12 @@ def _ors_call(points, alternatives, load_lb=0.0):
         body["alternative_routes"] = {"target_count": 3, "share_factor": 0.6, "weight_factor": 1.6}
     r = _session().post(ORS_URL, json=body, headers={"Authorization": settings.ORS_API_KEY}, timeout=60)
     if not r.ok:
+        # ORS sends {"error": {"code": ...}} for routing errors but {"error": "message"} for auth/quota ones.
         try:
-            code = r.json().get("error", {}).get("code")
+            err = r.json().get("error")
         except ValueError:
-            code = None
+            err = None
+        code = err.get("code") if isinstance(err, dict) else None
         if code in (2009, 2010):  # route not found / point not routable
             raise InputError("No drivable truck route between these locations.")
         raise UpstreamError(f"OpenRouteService error {r.status_code}: {r.text[:200]}")
