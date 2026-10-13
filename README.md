@@ -1,127 +1,126 @@
-# Weather-Aware Truck Routing (Spotter take-home)
+# Truck Routing
 
-React (Vite + TypeScript + Tailwind + MapLibre) frontend and Django 5 / DRF backend that compares up to
-three truck routes by forecast weather **at the truck's ETA** at each checkpoint, applies the load rules,
-and recommends the safest route.
+Pick the route that won't put a loaded truck in a 50 mph crosswind.
 
-```
-backend/   Django project (config/) + app routing/ (risk.py, geo.py, services.py, planner.py, views.py, tests/)
-frontend/  Vite React app (src/components/MapView.tsx, RouteCards.tsx, TripForm.tsx)
-render.yaml  Render blueprint for the backend      frontend/vercel.json  Vercel config for the frontend
-```
+You give it a start, a destination, a departure time and the load. It finds up to three truck routes,
+checks the forecast along each one for the hour the truck actually gets there, and tells you which one to
+take and why.
 
-## Setup
+Live app: (link coming after deploy)
+Walkthrough: (link coming)
+
+React + MapLibre on the front, Django + DRF on the back.
+
+## Run it
 
 ```bash
-# backend
+# backend, port 8000
 cd backend
-python3 -m venv venv && . venv/bin/activate
+python -m venv venv
+venv\Scripts\activate          # Mac/Linux: source venv/bin/activate
 pip install -r requirements.txt
-export ORS_API_KEY=...          # optional; see "Routing" below
+cp ../.env.example .env        # add your ORS_API_KEY
 python manage.py runserver 8000
-pytest -q                        # unit + API tests (risk, load, recommendation, HOS, sampling, errors, heatmap)
 
-# frontend (dev server proxies /api -> :8000)
+# frontend, port 5173 (proxies /api to the backend)
 cd frontend
 npm install
-npm run dev                      # http://localhost:5173
-npm test                         # vitest (heatmap colour bands match the API's risk bands)
-npm run build                    # production build in dist/
+npm run dev
 ```
-For a deployed frontend set `VITE_API_BASE=https://<backend-host>`; for the backend set
-`CORS_ALLOWED_ORIGINS=https://<frontend-host>`. See `.env.example`.
+
+Tests: `pytest` in `backend/`, `npm test` in `frontend/`.
+
+Get a free key at openrouteservice.org. Without it the app falls back to the public OSRM server, which
+routes for cars. It works, but it doesn't know a truck can't take that bridge, and its times are too
+optimistic for a rig.
+
+## Weather at the wrong time is useless
+
+This is the whole point of the app. Rain over Omaha at 9am doesn't matter if the truck rolls through at
+6pm. So every checkpoint gets its own ETA, and the forecast is pulled for that place at that time.
+
+ETAs include the stops a driver is legally required to take: a 30 minute break after 8 hours behind the
+wheel, and a 10 hour rest after 11. Skip those and every checkpoint past hour 11 is checked against the
+wrong weather. On Chicago to Denver that's the difference between arriving in 23 hours and 44.
+
+Forecasts are hourly, so a 2:40 arrival blends the 2:00 and 3:00 values instead of rounding.
+
+## Getting three routes
+
+OpenRouteService has a proper truck profile, and I pass it the real gross weight (load plus about
+35,000 lb of tractor and trailer). The catch: ORS only gives alternative routes for trips under 100 km.
+For anything longer, I make my own by forcing a route through a point off to one side of the direct
+line. Anything more than 1.6x slower than the fastest route, or mostly the same road, gets thrown out.
+
+Sometimes there's only one road. Islamabad to Kashgar goes over the Karakoram Highway or not at all,
+so you get one route, and the app says so.
+
+## Scoring
+
+Each checkpoint gets rated for wind, rain and snow using the table in the brief, and the worst of the
+three wins. Then the load rules can make it worse, never better:
+
+- 55+ mph wind: No Travel, whatever you're hauling
+- 45 to 54 mph with more than 30,000 lb: No Travel
+- 35 to 44 mph with more than 40,000 lb: Severe
+
+Each checkpoint covers the road halfway to its neighbours, so a route ends up as so many miles of Low,
+Moderate, High and so on. Routes are then ranked:
+
+1. Any No Travel stretch sends the route to the bottom. It's never recommended.
+2. Fewest Severe miles
+3. Fewest High miles
+4. Lowest average risk
+5. Shortest trip
+
+The app says why the winner won, e.g. "Recommended over Route B: Severe miles 0 vs 38". If every
+route hits No Travel, it recommends nothing and tells you to leave at another time. It won't pick the
+least bad way to drive into a storm.
+
+## Calls I had to make
+
+The brief's ranges share their edges (0.10-0.25, then 0.25-0.50). An edge value goes to the higher
+level, so 0.25 in/hr of rain is High. The top row says "> 1.00" and "> 3.0", so exactly 1.00 in/hr of
+rain and 3.0 of snow are Severe, not No Travel.
+
+Wind means sustained wind. Gusts show up in the app but don't change the score, because the brief gives
+one set of wind numbers and I didn't want to invent a second.
+
+The hours-of-service rules are simplified. The driver starts fresh, and the weekly hour limits are
+ignored.
+
+## The map
+
+Routes are drawn with their checkpoints coloured by risk. Hover a checkpoint to see its ETA and
+weather. The Checkpoints tab lists every one, plus the rest stops, and clicking a row takes you there.
+
+The weather layer covers about 30 miles either side of the routes, from departure to 48 hours out.
+Switch between overall risk, wind, rain and snow. Drag the slider, or hit play, and a small truck moves
+along each route so you can see what it would be driving into at that hour. All 48 hours load in one go,
+so the slider never waits on the server.
 
 ## API
 
 `POST /api/plan`
+
 ```json
-{"origin":"Dallas, TX","destination":"Denver, CO","departure":"2026-10-14T13:00:00Z","load_lb":35000,"interval_mi":25}
+{"origin": "Dallas, TX", "destination": "Denver, CO", "departure": "2026-10-14T13:00:00Z",
+ "load_lb": 35000, "interval_mi": 25}
 ```
-Returns `plan_id`, geocoded origin/destination, `recommended_route_id`, and `routes[]` with geometry,
-distance, `duration_s` (driving), `trip_duration_s` (driving + HOS stops), arrival, `stops[]` (HOS break/rest:
-kind, position, mile, start/end), `checkpoints[]` (lat/lon, mile, ETA, nearest forecast hour, wind/gust/rain/snow,
-risk level + driving factors) and `summary` (miles per risk level, severe/high miles, mileage-weighted average risk,
-max level, `has_no_travel`), plus `rank`, `recommended` and `reason` (e.g. "Recommended over Route B: Severe miles
-0 vs 38.").
 
-`GET /api/heatmap?plan_id=...` — a corridor grid (points on and ~30 mi either side of every route, de-duplicated)
-with hourly risk / wind / rain / snow for hours 0–48 after departure, plus `radius_mi` (ground radius of each
-point's disc). Fetched once per plan; the slider is fully client-side (each hour is a feature property and only a
-paint/sort expression changes, so no data is re-sent from the main thread).
+Returns the routes, checkpoints with weather and risk, rest stops, and the pick.
 
-The heatmap is drawn as blurred discs **coloured by the risk band of the value at that point** (the spec's thresholds
-for the chosen metric, same colours as checkpoints; Risk includes the load rules), not by point density, so a
-colour always means a level. Disc size is in ground miles, so the corridor looks the same at every zoom.
+`GET /api/heatmap?plan_id=...` returns the weather layer. Bad input (unknown city, departure in the
+past) gets a 400 with a readable message.
 
-`GET /health` and `GET /api/health` → `{"ok": true}`
+## Deploy
 
-MapLibre worker: Vite pre-bundling breaks maplibre-gl's default worker URL, so `src/maplibre-setup.ts` sets it explicitly with `setWorkerUrl(import "…/maplibre-gl-worker.mjs?url")` (served in dev, emitted as a hashed asset in builds).
+Backend goes to Render via `render.yaml`. Set `ORS_API_KEY` and `CORS_ALLOWED_ORIGINS`. Frontend goes
+to Vercel via `frontend/vercel.json`. Set `VITE_API_BASE` to the backend URL.
 
-## API choices
+## What it won't catch
 
-| Need | Service | Notes |
-|---|---|---|
-| Geocoding | Nominatim (OSM) with identifying User-Agent, Photon fallback; ORS geocoder when a key is set | free, no key |
-| Routing | **OpenRouteService `driving-hgv`** when `ORS_API_KEY` is set (put it in `backend/.env`, gitignored, auto-loaded by settings) | truck profile; `restrictions.weight` = gross tonnes = (load + 35,000 lb tare) / 2204.62. ORS only allows `alternative_routes` for routes ≤100 km (error 2004), so it is requested only when the straight line is ≤45 mi; otherwise (or if rejected) the same via-point detour strategy below is run **on ORS hgv** (via points use `radiuses: -1` so they snap to the nearest road), giving 3 truck routes. On ORS outage it falls back to OSRM |
-| Routing fallback | **OSRM public demo** (`router.project-osrm.org`, `alternatives=3`) | car profile; demo often returns <3 alternatives, so extra alternatives are synthesised by forcing a via-point offset perpendicular at the trip midpoint (10% / 18% / 30% of the straight-line distance, each side), keeping only candidates ≤1.6× the fastest duration that overlap existing routes <80% |
-| Weather | **Open-Meteo** hourly forecast, multi-location batch (100 points/request) | `wind_speed_unit=mph`, `precipitation_unit=inch` (so snowfall is inches/hour) |
-
-Responses (geocodes, routes) and a plan's route lines (for the heatmap call, 1 h) are kept in Django's
-**file-based cache** (`CACHE_DIR`, default the OS temp dir), so all gunicorn workers on a host share them; a
-per-process memory cache would 404 the heatmap whenever it hit a different worker than the plan.
-All geocoders are limited to the US, Canada and Mexico.
-
-## Logic
-
-1. Geocode, fetch up to 3 routes.
-2. Checkpoints at mile 0, every N miles (10/25/50), and the destination.
-3. Driving time to each point = cumulative route duration. Per-segment durations come from OSRM annotations /
-   ORS step durations (so slow city stretches are respected), interpolated within a segment and scaled to the
-   engine's total duration.
-4. **Hours of service.** ETA = departure + driving time + the HOS stops already taken: a 30-min break after 8 h of
-   driving and a 10-h off-duty rest after 11 h (which resets the break clock); simplified FMCSA rules for a solo
-   driver starting fresh (14-h window never binds; 60/70-h weekly limit ignored). Stops are returned with their
-   position and shown on the map and in the checkpoint table; arrival and "Trip" time include them.
-5. All checkpoints of all routes are fetched in one batched Open-Meteo call; each value is **linearly interpolated**
-   between the two forecast hours around the ETA.
-6. Checkpoint risk = worst of wind / rain / snow levels, then the load rules can only raise it.
-7. Route summary is **mileage-weighted**: each checkpoint represents half the distance to each neighbour
-   (so at 25 mi interior checkpoints each represent 25 mi, the endpoints 12.5 mi, and the sum equals route length).
-8. Ranking: routes with any No Travel checkpoint last (and never "Recommended"; among them fewest No Travel miles first), then fewest Severe miles,
-   fewest High miles, lowest average risk, shortest travel time. If every route has No Travel, no route is
-   recommended and a warning suggests delaying departure. "Travel time" is the trip time including HOS stops.
-   Each route carries a `reason`: the first ranking criterion that separates it from the top route (for the top
-   route: from the runner-up).
-
-### Assumptions
-* **Overlapping/gapped bins.** The table uses ranges like 25–34 / 35–44 mph and 0.10–0.25 / 0.25–0.50 in.
-  Each bin is treated as `[lower, next lower)`: 34.6 mph is Moderate, 0.25 in/hr is High, 0.50 is Severe,
-  2.0 in/hr snow is Severe. Upper extremes follow the spec literally: rain **1.00 in/hr is Severe**, only
-  `>1.00` is No Travel; snow **3.0 is Severe**, only `>3.0` is No Travel; wind `≥55` is No Travel.
-* **Wind** = sustained 10 m wind speed (gusts are shown but not scored). Load rules use the same value;
-  ">30,000 lb" / ">40,000 lb" are strict.
-* **Rain** = Open-Meteo `rain + showers` (liquid only, in/hr); snow = `snowfall` in in/hr.
-* **Interval** is measured along the route polyline (not straight-line), starting at the origin.
-* **Average risk** = Σ(level × miles) / total miles on the 0–4 scale (Low 0 … No Travel 4).
-* Ties in severe/high miles are compared at 0.1 mi resolution.
-* Departure must be within the forecast horizon (now − 1 h … now + 13 days).
-* The whole trip (latest arrival) must end inside Open-Meteo's 16-day hourly horizon, otherwise `400` with a clear message.
-  Heatmap slider steps are the real forecast hours (nearest hour to departure, +0…+48 h); hours past the horizon are
-  dropped instead of repeating the last hour.
-* **Time zones.** The API works in UTC (a departure without an offset is treated as UTC). The UI's `datetime-local`
-  departure is interpreted in the **browser's** time zone (shown under the field) and every ETA/arrival/slider time
-  is displayed in that zone with its abbreviation. Open-Meteo is queried with `timezone=GMT`.
-* **Errors.** Unknown place, same origin/destination, no road route (e.g. ocean crossing), past/too-far departure and
-  out-of-range load return `400` with an `error` message; upstream outages return `502`. Open-Meteo 429/5xx are retried
-  up to 3× with back-off.
-* Route geometry sent to the browser is simplified (Douglas-Peucker, ~50 m), e.g. Chicago→Seattle response 1.6 MB → 0.2 MB;
-  checkpoints/ETAs still use full-resolution lines. MapLibre is lazy-loaded in its own chunk (initial JS ≈ 73 kB gzip).
-
-## Gaps / next steps
-* Without an ORS key the routes come from OSRM's **car** profile (no truck restrictions, car speeds, so ETAs are
-  optimistic); set `ORS_API_KEY` for HGV.
-* Alternatives on long trips are synthesised via a perpendicular detour point at the midpoint (ORS only returns
-  engine alternatives under 100 km), so they are plausible corridors rather than "official" alternatives.
-* Wind risk uses sustained wind; gusts are shown but not scored (the spec gives one wind threshold set).
-* Public demo servers (OSRM, Nominatim) are rate-limited and not for production load.
-* The file cache is per host; use Redis if the backend is scaled to several instances.
+- A storm that sits between two checkpoints. Use 10 mile spacing if you're worried.
+- Trips that end more than about 16 days out. That's as far as the forecast goes.
+- Seasonal closures. The Khunjerab Pass is shut in winter and the router has no idea.
+- Heavy traffic. It runs on free public APIs with rate limits.

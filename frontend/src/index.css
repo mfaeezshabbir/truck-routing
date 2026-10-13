@@ -1,5 +1,17 @@
 @import "tailwindcss";
 @import "maplibre-gl/dist/maplibre-gl.css";
+
+@theme {
+  --color-ink: #1e3a5f;
+  --color-ink-soft: #e8eef5;
+}
+
 html, body, #root { height: 100%; margin: 0; }
-body { font-family: Inter, system-ui, sans-serif; }
-.maplibregl-popup-content { border-radius: 0.75rem; padding: 0.75rem 0.9rem; }
+body { color: #1f2933; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-feature-settings: "tnum" 1; }
+
+/* Keep popups above the HTML route labels and truck markers. */
+.maplibregl-popup { z-index: 10; }
+.maplibregl-popup-content { border-radius: 6px; padding: 0.65rem 0.8rem; border: 1px solid #d5dbe1; box-shadow: none; }
+.maplibregl-popup-anchor-bottom .maplibregl-popup-tip { border-top-color: #d5dbe1; }
+.maplibregl-popup-anchor-top .maplibregl-popup-tip { border-bottom-color: #d5dbe1; }
+.maplibregl-ctrl-group { box-shadow: none !important; border: 1px solid #d5dbe1; }

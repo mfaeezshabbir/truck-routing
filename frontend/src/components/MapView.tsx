@@ -7,6 +7,8 @@ import type { ExpressionSpecification } from 'maplibre-gl'
 import type { Checkpoint, Focus, Heatmap, Plan, Route, Stop } from '../types'
 import { RISK_COLORS, fmtDuration, fmtTime } from '../risk'
 import { levelExpression, type Metric } from '../metrics'
+import { truckAt } from '../timeline'
+import { CloudRain, Snowflake, Truck, Wind } from 'lucide-react'
 
 const STYLE = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json'
 // MapLibre uses 512 px tiles: metres per pixel at zoom 0 on the equator.
@@ -34,11 +36,12 @@ function CheckpointPopup({ cp, route }: { cp: Checkpoint; route: string }) {
     <div className="space-y-1 text-xs text-slate-700">
       <div className="flex items-center justify-between gap-3">
         <span className="font-semibold text-slate-900">{route} · mile {cp.mile.toFixed(0)}</span>
-        <span className="rounded px-1.5 py-0.5 font-semibold text-white" style={{ background: RISK_COLORS[cp.risk.level] }}>{cp.risk.label}</span>
+        <span className="font-semibold" style={{ color: RISK_COLORS[cp.risk.level] }}>{cp.risk.label}</span>
       </div>
       <div>ETA <b>{fmtTime(cp.eta)}</b></div>
-      <div>Wind <b>{cp.weather.wind_mph} mph</b> (gust {cp.weather.gust_mph})</div>
-      <div>Rain <b>{cp.weather.rain_in_hr.toFixed(2)} in/hr</b> · Snow <b>{cp.weather.snow_in_hr.toFixed(2)} in/hr</b></div>
+      <div className="flex items-center gap-1.5"><Wind size={12} className="text-slate-400" />{cp.weather.wind_mph} mph, gusts {cp.weather.gust_mph}</div>
+      <div className="flex items-center gap-1.5"><CloudRain size={12} className="text-slate-400" />{cp.weather.rain_in_hr.toFixed(2)} in/hr rain</div>
+      <div className="flex items-center gap-1.5"><Snowflake size={12} className="text-slate-400" />{cp.weather.snow_in_hr.toFixed(2)} in/hr snow</div>
       {cp.risk.factors.length > 0 && <div className="text-slate-500">Driven by: {cp.risk.factors.join(', ')}</div>}
     </div>
   )
@@ -81,8 +84,7 @@ export default function MapView({ plan, heatmap, hour, metric, showHeatmap, sele
     }))),
   }), [plan])
 
-  // Built once per heatmap response: every hour's value is a property, so the slider only
-  // changes a paint expression (no GeoJSON re-upload from the main thread).
+  // Every hour's value is a feature property, so moving the slider only changes a paint expression.
   const heatGeo = useMemo<GeoJSON.FeatureCollection>(() => ({
     type: 'FeatureCollection',
     features: (heatmap?.points ?? []).map(([lon, lat], i) => {
@@ -106,7 +108,7 @@ export default function MapView({ plan, heatmap, hour, metric, showHeatmap, sele
     for (const r of plan.routes) for (const [x, y] of r.geometry.coordinates) {
       if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y
     }
-    if (Number.isFinite(x0)) mapRef.current.fitBounds([[x0, y0], [x1, y1]], { padding: 60, duration: 800 })
+    if (Number.isFinite(x0)) mapRef.current.fitBounds([[x0, y0], [x1, y1]], { padding: { top: 60, left: 60, right: 60, bottom: 190 }, duration: 800 })
     setHover(null)
   }, [plan])
 
@@ -116,8 +118,7 @@ export default function MapView({ plan, heatmap, hour, metric, showHeatmap, sele
     if (cp) mapRef.current.easeTo({ center: [cp.lon, cp.lat], zoom: Math.max(mapRef.current.getZoom(), 6.5), duration: 600 })
   }, [focus, plan])
 
-  // Each disc is coloured by the metric's own risk band at the selected hour (same thresholds and colours
-  // as the checkpoints), so colour means a level, not point density. Higher levels draw on top.
+  // Colour = the risk band of the value at that point (same bands as checkpoints), worst drawn on top.
   const level = levelExpression(metric, hour)
   const heatColor: ExpressionSpecification = ['match', level, 0, RISK_COLORS[0], 1, RISK_COLORS[1], 2, RISK_COLORS[2], 3, RISK_COLORS[3], RISK_COLORS[4]]
   const heatOpacity: ExpressionSpecification = ['match', level, 0, 0.16, 0.42]
@@ -201,10 +202,10 @@ export default function MapView({ plan, heatmap, hour, metric, showHeatmap, sele
           style={{ zIndex: r.id === sel ? 2 : 1 }}
           onClick={e => { e.originalEvent.stopPropagation(); onSelectRoute(r.id) }}>
           <button type="button" aria-label={`Select ${r.name}`}
-            className={`whitespace-nowrap rounded-lg border bg-white/95 px-2 py-1 text-left text-[11px] leading-tight shadow-md ${r.id === sel ? 'border-slate-900' : 'border-slate-200 opacity-80'}`}>
+            className={`whitespace-nowrap rounded border bg-white px-1.5 py-0.5 text-left text-[11px] leading-tight ${r.id === sel ? 'border-slate-900' : 'border-slate-300 opacity-80'}`}>
             <div className="flex items-center gap-1 font-semibold text-slate-900">
               <span className="h-2 w-2 rounded-full" style={{ background: r.color }} />
-              {r.name}{r.recommended && <span className="text-emerald-700">· Recommended</span>}
+              {r.name}{r.recommended && <span className="font-normal text-emerald-700">recommended</span>}
             </div>
             <div className="text-slate-600">
               {fmtDuration(r.trip_duration_s)} · Severe {r.summary.severe_miles.toFixed(0)} mi · High {r.summary.high_miles.toFixed(0)} mi
@@ -212,6 +213,19 @@ export default function MapView({ plan, heatmap, hour, metric, showHeatmap, sele
           </button>
         </Marker>
       ))}
+      {heatmap && plan?.routes.map(r => {
+        const t = truckAt(r, heatmap.hours[hour])
+        if (!t) return null
+        const active = r.id === sel
+        return (
+          <Marker key={`truck${r.id}`} longitude={t.lon} latitude={t.lat} style={{ zIndex: active ? 4 : 3 }}>
+            <div title={`${r.name} truck`} className={`flex items-center justify-center rounded-md border-2 border-white ${active ? 'h-7 w-7' : 'h-5 w-5 opacity-70'}`}
+              style={{ background: r.color }}>
+              <Truck size={active ? 15 : 11} color="white" />
+            </div>
+          </Marker>
+        )
+      })}
       {popup}
     </Map>
   )

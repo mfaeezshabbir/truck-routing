@@ -40,9 +40,6 @@ def _session():
 
 
 # ---------------------------------------------------------------- geocoding
-# All geocoders are limited to North America (US, Canada, Mexico) so "Paris" means Paris, TX.
-NA_BBOX = "-170,14,-50,72"
-
 def geocode(query: str) -> dict:
     key = "geo:" + hashlib.sha1(query.strip().lower().encode()).hexdigest()  # memcached-safe key
     hit = cache.get(key)
@@ -51,7 +48,7 @@ def geocode(query: str) -> dict:
     if settings.ORS_API_KEY:
         r = _session().get(
             "https://api.openrouteservice.org/geocode/search",
-            params={"api_key": settings.ORS_API_KEY, "text": query, "size": 1, "boundary.country": "US,CA,MX"},
+            params={"api_key": settings.ORS_API_KEY, "text": query, "size": 1},
             timeout=TIMEOUT,
         )
         if r.ok and r.json().get("features"):
@@ -64,7 +61,7 @@ def geocode(query: str) -> dict:
     try:
         r = _session().get(
             "https://nominatim.openstreetmap.org/search",
-            params={"q": query, "format": "jsonv2", "limit": 1, "countrycodes": "us,ca,mx"},
+            params={"q": query, "format": "jsonv2", "limit": 1},
             timeout=TIMEOUT,
         )
         if r.ok and r.json():
@@ -74,8 +71,7 @@ def geocode(query: str) -> dict:
         log.warning("Nominatim failed: %s", e)
     if res is None:
         # Fallback: Photon (Komoot), also OSM-based and free.
-        r = _session().get("https://photon.komoot.io/api/", params={"q": query, "limit": 1, "bbox": NA_BBOX},
-                           timeout=TIMEOUT)
+        r = _session().get("https://photon.komoot.io/api/", params={"q": query, "limit": 1}, timeout=TIMEOUT)
         feats = r.json().get("features", []) if r.ok else []
         if not feats:
             raise InputError(f"Could not find location: {query}")

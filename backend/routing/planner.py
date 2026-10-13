@@ -24,7 +24,7 @@ def _reason(rank, order, summaries, routes):
     """Why a route sits where it does: the first ranking criterion separating it from its neighbour."""
     i = order[rank]
     if len(order) == 1:
-        return "Only route found."
+        return "Only one route was found between these places."
     other = order[1] if rank == 0 else order[0]
     name = routes[other]["out"]["name"]
     if rank > 0:
@@ -148,7 +148,7 @@ def heatmap(plan_id: str, hours: int = 48, spacing_mi: float = 20.0, lateral_mi:
     load_lb = plan["load_lb"]
 
     total = sum(geo.cumulative(l, [])[0][-1] for l in plan["lines"])
-    # keep the grid around <=450 points
+    # Keep the grid to roughly 450 points or fewer.
     spacing = max(spacing_mi, total / 150)
     # Each point is drawn as a disc wide enough to overlap its neighbours (along the route and sideways).
     radius_mi = 0.9 * max(spacing, lateral_mi)
@@ -171,9 +171,7 @@ def heatmap(plan_id: str, hours: int = 48, spacing_mi: float = 20.0, lateral_mi:
     end = departure + timedelta(hours=hours)
     times, hourly = services.fetch_hourly(points, departure, end)
     i0 = services.nearest_index(times, departure)
-    # Slider step h shows forecast hour times[i0 + h] (the same "nearest hour" rule as checkpoint ETAs);
-    # labels are those real forecast timestamps, and hours past the forecast horizon are dropped
-    # rather than silently repeating the last hour.
+    # Slider step h is forecast hour times[i0 + h]. Hours past the forecast horizon are dropped.
     n = max(0, min(hours + 1, len(times) - i0)) if i0 >= 0 else 0
     hour_labels = [times[i0 + h].isoformat() for h in range(n)]
     risk_m, wind_m, rain_m, snow_m = [], [], [], []

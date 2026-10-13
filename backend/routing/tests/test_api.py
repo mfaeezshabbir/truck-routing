@@ -291,7 +291,7 @@ def test_weather_interpolated_between_forecast_hours(client, monkeypatch):
 @pytest.mark.django_db
 def test_routes_carry_reason(client):
     r = client.post("/api/plan", body(), format="json").data
-    assert r["routes"][0]["reason"] == "Only route found."
+    assert r["routes"][0]["reason"] == "Only one route was found between these places."
 
 
 @pytest.mark.django_db
